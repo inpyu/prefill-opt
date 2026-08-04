@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <string>
 #include <vector>
 #include "nn/nn-core.hpp"
 #include "nn/nn-cpu.hpp"
@@ -102,6 +103,7 @@ public:
     bool wallMetrics;
     NnUint decodeLogInterval;
     NnUint decodeCbMaxActive;
+    NnUint decodeCbMaxNewTokens;
     bool pipelineDelta;
     NnUint pipelineDeltaMinBytes;
     NnUint pipelineChunkBytes;
@@ -109,6 +111,7 @@ public:
     bool ppStageSkip;
     NnUint ppStageSkipTarget;
     float ppStageSkipTheta;
+    float ppStageSkipAlpha;
     bool ppStageSkipVerifierDelta;
     NnUint ppStageSkipMaxConsecutive;
     NnUint ppStageSkipMaxRejectStreak;
@@ -127,6 +130,7 @@ public:
 
 #define MAX_SP_GROUPS 8
 #define MAX_CONTROL_BATCH_POS 64
+#define MAX_STAGE_SKIP_LOG_PREFIX 256
 
 typedef struct {
     NnUint position;
@@ -143,9 +147,11 @@ typedef struct {
     NnUint stageSkipEnabled; // 0 = off, 1 = execute
     NnUint stageSkipTarget; // pp rank to bypass
     float stageSkipTheta; // gate+verifier threshold (delta_norm)
+    float stageSkipAlpha; // deterministic acceptance-rate scaler in [0,1]
     NnUint stageSkipMaxConsecutive;
     NnUint stageSkipMaxRejectStreak;
     NnUint stageSkipLog; // 0 = off, 1 = token log on
+    char stageSkipLogFilePrefix[MAX_STAGE_SKIP_LOG_PREFIX];
     NnUint batchPositions[MAX_CONTROL_BATCH_POS];
     // Per-SP-group overrides (used when spSize > 1 for concurrent P/D)
     // spGroups[i].batchSize == 0 means SP group i is idle
@@ -200,9 +206,11 @@ public:
         bool stageSkipEnabled,
         NnUint stageSkipTarget,
         float stageSkipTheta,
+        float stageSkipAlpha,
         NnUint stageSkipMaxConsecutive,
         NnUint stageSkipMaxRejectStreak,
-        bool stageSkipLog
+        bool stageSkipLog,
+        const char *stageSkipLogFilePrefix
     );
     void setDecodePhase(bool isDecodePhase);
     bool isDecodePhase() const;
@@ -263,6 +271,8 @@ private:
     std::vector<NnByte> prevXPipeRow;
     bool hasPrevXPipeRow;
     std::vector<float> stageDeltaNorm;
+    std::vector<float> stageCosine;
+    std::vector<float> stageNormRatio;
     std::vector<float> stageSkipScore;
     std::vector<NnUint> stageSkipAccept;
     std::vector<NnUint> stageVerifierUs;
@@ -272,15 +282,22 @@ private:
     NnUint lastSkipDecisionAccept;
     bool hasLastDeltaNorm;
     float lastDeltaNorm;
+    bool hasLastActivationMetrics;
+    float lastActivationCosine;
+    float lastActivationNormRatio;
+    float lastActivationCurrNorm;
+    float lastActivationPrevNorm;
     NnUint skipConsecutiveAccepts;
     NnUint skipRejectStreak;
     NnUint skipForcedFullByRejectStreak;
     FILE *skipLogFile;
+    std::string skipLogFilePrefix;
     unsigned long long skipLogRunId;
     bool skipLogHeaderWritten;
     bool isStageSkipDecisionStage() const;
     bool isStageSkipTargetStage() const;
     bool isStageSkipPostTargetStage() const;
+    void configureStageSkipLogFile(const char *pathPrefix);
     void evaluateStageSkipDecision();
 public:
     WorkerLlmInference(
@@ -301,6 +318,7 @@ public:
     NnUint getPosition() const;
     NnUint getBatchSize() const;
     bool shouldSkipForward() const;
+    bool shouldRecordSkipLog() const;
     void recordStageTiming(NnUint recvUs, NnUint fwdUs, NnUint sendUs, NnUint totalUs);
     void recordOpTiming(const NnExecutorOpBreakdown &opBreakdown);
     void printStageTimingSummary() const;

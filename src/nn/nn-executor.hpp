@@ -74,7 +74,8 @@ typedef struct {
 typedef struct {
     NnUint syncUs;
     NnUint normUs;
-    NnUint attnUs;
+    NnUint attnUs;      // attention 계열 합계 (attnCoreUs 포함) — 기존 호출부 호환용
+    NnUint attnCoreUs;  // EXP-1/H2: multihead_att·softmax 등 O(S^2) 항만
     NnUint ffnUs;
     NnUint lmHeadUs;
     NnUint otherUs;

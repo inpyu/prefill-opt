@@ -104,6 +104,11 @@ private:
     std::atomic<NnSize> activationTxBytes;
     std::atomic<NnSize> activationRxBytes;
     std::atomic<NnUint> kvMigrationViolations;
+    // EXP-1: sync 시간을 wait(peer 대기)과 xfer(실제 바이트 이동)로 분리한다.
+    // readMany/writeMany의 busy-poll 루프에서 바이트 진행이 있었던 패스는 xfer,
+    // 진행이 없었던 패스(+ 재시도 sleep)는 wait로 적산한다.
+    std::atomic<unsigned long long> syncWaitUs;
+    std::atomic<unsigned long long> syncXferUs;
 
     void updateSocketStats(NnUint socketIndex, double latencyMs, NnSize bytes);
 
@@ -129,6 +134,9 @@ public:
     void addTaggedTraffic(bool isKv, NnSize txBytes, NnSize rxBytes);
     void noteKvMigrationViolation();
     void getTrafficBreakdown(NnTrafficBreakdown *stats);
+    // EXP-1: 누적 wait/xfer 마이크로초를 읽고, 구간별 측정을 위해 리셋한다.
+    void getSyncTimeBreakdown(unsigned long long *waitUs, unsigned long long *xferUs);
+    void resetSyncTimeBreakdown();
     void resetStats();
     void printSocketTrafficSummary(NnUint socketIndex, const char *label) const;
     

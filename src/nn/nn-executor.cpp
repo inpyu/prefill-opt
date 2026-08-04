@@ -434,6 +434,16 @@ bool NnExecutor::getLastForwardOpBreakdown(NnExecutorOpBreakdown *out) const {
             out->ffnUs += us;
             continue;
         }
+        // EXP-1/H2: attention score 경로(O(S^2))를 projection 경로(O(S·h^2))와 분리한다.
+        // 짧은 프롬프트에서 O(S^2) 항이 지배적이지 않다는 가설을 이 값으로 판정한다.
+        if (
+            opNameContains(name, "multihead_att") ||
+            opNameContains(name, "softmax")
+        ) {
+            out->attnCoreUs += us;
+            out->attnUs += us;
+            continue;
+        }
         if (
             opNameContains(name, "_q") ||
             opNameContains(name, "_k") ||

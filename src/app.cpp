@@ -236,6 +236,102 @@ static bool computeDeltaNormEncoded(
     return true;
 }
 
+static bool computeActivationPairMetricsEncoded(
+    const NnByte *curr,
+    const NnByte *prev,
+    NnSize rowBytes,
+    NnFloatType dtype,
+    float *deltaNormOut,
+    float *cosineOut,
+    float *normRatioOut,
+    float *currNormOut,
+    float *prevNormOut
+) {
+    if (curr == nullptr || prev == nullptr || deltaNormOut == nullptr ||
+        cosineOut == nullptr || normRatioOut == nullptr ||
+        currNormOut == nullptr || prevNormOut == nullptr) {
+        return false;
+    }
+    const double eps = 1e-12;
+    double diffSq = 0.0;
+    double currSq = 0.0;
+    double prevSq = 0.0;
+    double dot = 0.0;
+
+    auto addPair = [&](double cv, double pv) {
+        const double dv = cv - pv;
+        diffSq += dv * dv;
+        currSq += cv * cv;
+        prevSq += pv * pv;
+        dot += cv * pv;
+    };
+
+    if (dtype == F_32) {
+        if (rowBytes % sizeof(float) != 0)
+            return false;
+        const NnSize n = rowBytes / sizeof(float);
+        const float *c = (const float *)curr;
+        const float *p = (const float *)prev;
+        for (NnSize i = 0; i < n; i++)
+            addPair((double)c[i], (double)p[i]);
+    } else if (dtype == F_16) {
+        if (rowBytes % sizeof(std::uint16_t) != 0)
+            return false;
+        const NnSize n = rowBytes / sizeof(std::uint16_t);
+        const std::uint16_t *c = (const std::uint16_t *)curr;
+        const std::uint16_t *p = (const std::uint16_t *)prev;
+        for (NnSize i = 0; i < n; i++)
+            addPair((double)CONVERT_F16_TO_F32(c[i]), (double)CONVERT_F16_TO_F32(p[i]));
+    } else if (dtype == F_Q80) {
+        if (rowBytes % sizeof(NnBlockQ80) != 0)
+            return false;
+        const NnSize nBlocks = rowBytes / sizeof(NnBlockQ80);
+        const NnBlockQ80 *c = (const NnBlockQ80 *)curr;
+        const NnBlockQ80 *p = (const NnBlockQ80 *)prev;
+        for (NnSize i = 0; i < nBlocks; i++) {
+            const double cd = (double)CONVERT_F16_TO_F32(c[i].d);
+            const double pd = (double)CONVERT_F16_TO_F32(p[i].d);
+            for (NnUint k = 0; k < Q80_BLOCK_SIZE; k++)
+                addPair(cd * (double)c[i].qs[k], pd * (double)p[i].qs[k]);
+        }
+    } else if (dtype == F_Q40) {
+        if (rowBytes % sizeof(NnBlockQ40) != 0)
+            return false;
+        const NnSize nBlocks = rowBytes / sizeof(NnBlockQ40);
+        const NnBlockQ40 *c = (const NnBlockQ40 *)curr;
+        const NnBlockQ40 *p = (const NnBlockQ40 *)prev;
+        for (NnSize i = 0; i < nBlocks; i++) {
+            const double cd = (double)CONVERT_F16_TO_F32(c[i].d);
+            const double pd = (double)CONVERT_F16_TO_F32(p[i].d);
+            for (NnUint k = 0; k < Q40_BLOCK_SIZE / 2; k++) {
+                addPair(cd * (double)((c[i].qs[k] & 0x0F) - 8), pd * (double)((p[i].qs[k] & 0x0F) - 8));
+                addPair(cd * (double)((c[i].qs[k] >> 4) - 8), pd * (double)((p[i].qs[k] >> 4) - 8));
+            }
+        }
+    } else {
+        return false;
+    }
+
+    const double currNorm = std::sqrt(currSq);
+    const double prevNorm = std::sqrt(prevSq);
+    *deltaNormOut = (float)(std::sqrt(diffSq) / (prevNorm + eps));
+    *cosineOut = (float)(dot / ((currNorm * prevNorm) + eps));
+    *normRatioOut = (float)(currNorm / (prevNorm + eps));
+    *currNormOut = (float)currNorm;
+    *prevNormOut = (float)prevNorm;
+    return true;
+}
+
+static float deterministicStageSkipUnit(NnUint position, NnUint targetStage) {
+    std::uint32_t x = position * 2654435761u ^ targetStage * 2246822519u ^ 0x9E3779B9u;
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return (float)(x & 0x00FFFFFFu) / (float)0x01000000u;
+}
+
 static NnUint sampleArgmaxToken(const float *logits, NnUint logitsDim) {
     if (logitsDim == 0u)
         return 0u;
@@ -367,6 +463,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.wallMetrics = true;
     args.decodeLogInterval = 1;
     args.decodeCbMaxActive = 0;
+    args.decodeCbMaxNewTokens = 0;
     args.pipelineDelta = false;
     args.pipelineDeltaMinBytes = 4096;
     args.pipelineChunkBytes = 0;
@@ -374,6 +471,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.ppStageSkip = false;
     args.ppStageSkipTarget = 4;
     args.ppStageSkipTheta = 0.10f;
+    args.ppStageSkipAlpha = 1.0f;
     args.ppStageSkipVerifierDelta = true;
     args.ppStageSkipMaxConsecutive = 3;
     args.ppStageSkipMaxRejectStreak = 8;
@@ -511,6 +609,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             args.decodeLogInterval = (NnUint)atoi(value);
         } else if (std::strcmp(name, "--decode-cb-max-active") == 0) {
             args.decodeCbMaxActive = (NnUint)atoi(value);
+        } else if (std::strcmp(name, "--decode-cb-max-new-tokens") == 0) {
+            args.decodeCbMaxNewTokens = (NnUint)atoi(value);
         } else if (std::strcmp(name, "--pipeline-delta") == 0) {
             args.pipelineDelta = atoi(value) == 1;
         } else if (std::strcmp(name, "--pipeline-delta-min-bytes") == 0) {
@@ -525,6 +625,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             args.ppStageSkipTarget = (NnUint)atoi(value);
         } else if (std::strcmp(name, "--pp-stage-skip-theta") == 0) {
             args.ppStageSkipTheta = (float)atof(value);
+        } else if (std::strcmp(name, "--pp-stage-skip-alpha") == 0) {
+            args.ppStageSkipAlpha = (float)atof(value);
         } else if (std::strcmp(name, "--pp-stage-skip-verifier") == 0) {
             if (std::strcmp(value, "delta") != 0) {
                 throw std::runtime_error("Unsupported --pp-stage-skip-verifier (v1 supports only: delta)");
@@ -557,6 +659,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
         throw std::runtime_error("decode-cb-max-active exceeds MAX_CONTROL_BATCH_POS");
     if (args.ppStageSkipTheta < 0.0f)
         throw std::runtime_error("pp-stage-skip-theta must be >= 0");
+    if (args.ppStageSkipAlpha < 0.0f || args.ppStageSkipAlpha > 1.0f)
+        throw std::runtime_error("pp-stage-skip-alpha must be in [0,1]");
     if (args.ppStageSkipMaxConsecutive < 1)
         throw std::runtime_error("pp-stage-skip-max-consecutive must be >= 1");
     if (args.ppStageSkipMaxRejectStreak < 1)
@@ -645,9 +749,11 @@ RootLlmInference::RootLlmInference(
     bool stageSkipEnabled,
     NnUint stageSkipTarget,
     float stageSkipTheta,
+    float stageSkipAlpha,
     NnUint stageSkipMaxConsecutive,
     NnUint stageSkipMaxRejectStreak,
-    bool stageSkipLog
+    bool stageSkipLog,
+    const char *stageSkipLogFilePrefix
 ) {
     this->header = net->header;
     this->tokenPipe = (float *)execution->pipes[net->tokenPipeIndex];
@@ -690,9 +796,19 @@ RootLlmInference::RootLlmInference(
     controlPacket.stageSkipEnabled = stageSkipEnabled ? 1u : 0u;
     controlPacket.stageSkipTarget = stageSkipTarget;
     controlPacket.stageSkipTheta = stageSkipTheta;
+    controlPacket.stageSkipAlpha = stageSkipAlpha;
     controlPacket.stageSkipMaxConsecutive = stageSkipMaxConsecutive;
     controlPacket.stageSkipMaxRejectStreak = stageSkipMaxRejectStreak;
     controlPacket.stageSkipLog = stageSkipLog ? 1u : 0u;
+    controlPacket.stageSkipLogFilePrefix[0] = '\0';
+    if (stageSkipLogFilePrefix != nullptr && stageSkipLogFilePrefix[0] != '\0') {
+        std::snprintf(
+            controlPacket.stageSkipLogFilePrefix,
+            sizeof(controlPacket.stageSkipLogFilePrefix),
+            "%s",
+            stageSkipLogFilePrefix
+        );
+    }
     controlPacket.positionMode = 0u;
     setDecodePhase(false);
 }
@@ -984,6 +1100,9 @@ WorkerLlmInference::WorkerLlmInference(
     this->stageFwdUs.clear();
     this->stageSendUs.clear();
     this->stageTotalUs.clear();
+    this->stageDeltaNorm.clear();
+    this->stageCosine.clear();
+    this->stageNormRatio.clear();
     this->opSyncUs.clear();
     this->opNormUs.clear();
     this->opAttnUs.clear();
@@ -992,7 +1111,6 @@ WorkerLlmInference::WorkerLlmInference(
     this->opOtherUs.clear();
     this->prevXPipeRow.resize(xPipeRowBytes);
     this->hasPrevXPipeRow = false;
-    this->stageDeltaNorm.clear();
     this->stageSkipScore.clear();
     this->stageSkipAccept.clear();
     this->stageVerifierUs.clear();
@@ -1002,10 +1120,16 @@ WorkerLlmInference::WorkerLlmInference(
     this->lastSkipDecisionAccept = 0u;
     this->hasLastDeltaNorm = false;
     this->lastDeltaNorm = 0.0f;
+    this->hasLastActivationMetrics = false;
+    this->lastActivationCosine = 0.0f;
+    this->lastActivationNormRatio = 0.0f;
+    this->lastActivationCurrNorm = 0.0f;
+    this->lastActivationPrevNorm = 0.0f;
     this->skipConsecutiveAccepts = 0u;
     this->skipRejectStreak = 0u;
     this->skipForcedFullByRejectStreak = 0u;
     this->skipLogFile = nullptr;
+    this->skipLogFilePrefix.clear();
     this->skipLogRunId = (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     this->skipLogHeaderWritten = false;
@@ -1032,9 +1156,24 @@ WorkerLlmInference::WorkerLlmInference(
             pipelineChunkBytes
         ));
     }
-    if (ppStageSkipLogFilePath != nullptr && ppStageSkipLogFilePath[0] != '\0') {
+    configureStageSkipLogFile(ppStageSkipLogFilePath);
+}
+
+void WorkerLlmInference::configureStageSkipLogFile(const char *pathPrefix) {
+    if (pathPrefix == nullptr || pathPrefix[0] == '\0')
+        return;
+    if (skipLogFile != nullptr && skipLogFilePrefix == pathPrefix)
+        return;
+    if (skipLogFile != nullptr) {
+        std::fclose(skipLogFile);
+        skipLogFile = nullptr;
+        skipLogHeaderWritten = false;
+    }
+
+    skipLogFilePrefix = pathPrefix;
+    {
         char path[1024];
-        std::snprintf(path, sizeof(path), "%s.node%u.tsv", ppStageSkipLogFilePath, nodeConfig->nodeIndex);
+        std::snprintf(path, sizeof(path), "%s.node%u.tsv", pathPrefix, nodeConfig->nodeIndex);
         if (!ensureParentDirectoryForFile(path)) {
             printf("⚠️  Unable to create parent directory for pp-stage-skip log file: %s (errno=%d: %s)\n",
                 path, errno, std::strerror(errno));
@@ -1042,7 +1181,7 @@ WorkerLlmInference::WorkerLlmInference(
         this->skipLogFile = std::fopen(path, "a");
         if (this->skipLogFile != nullptr) {
             std::fprintf(this->skipLogFile,
-                "run_id\tnode\tpp\tpos\ttarget_stage\tdelta_norm\tgate_pass\tverifier_score\tverifier_pass\twas_skip\tfallback\tconsecutive_skip\treject_streak\tforced_full_total\trecv_wait_ms\twall_step_ms\ttoken_id\tis_special\ttoken_text\n");
+                "run_id\tnode\tpp\tpos\ttarget_stage\tdelta_norm\tgate_pass\tverifier_score\tverifier_pass\twas_skip\tfallback\tconsecutive_skip\treject_streak\tforced_full_total\trecv_wait_ms\twall_step_ms\talpha\tcosine\tnorm_ratio\tcurr_norm\tprev_norm\ttoken_id\tis_special\ttoken_text\n");
             std::fflush(this->skipLogFile);
             this->skipLogHeaderWritten = true;
             printf("🧪 Opened pp-stage-skip log file: %s\n", path);
@@ -1069,6 +1208,8 @@ bool WorkerLlmInference::tryReadControlPacket() {
         isFinished = true;
         return true;
     }
+    if (controlPacket.stageSkipLog == 1u)
+        configureStageSkipLogFile(controlPacket.stageSkipLogFilePrefix);
 
     if (controlPacket.batchSize > maxBatchSize) {
         throw NnExecutorException(
@@ -1150,6 +1291,10 @@ bool WorkerLlmInference::shouldSkipForward() const {
     return skipForwardThisToken;
 }
 
+bool WorkerLlmInference::shouldRecordSkipLog() const {
+    return controlPacket.stageSkipLog == 1u;
+}
+
 bool WorkerLlmInference::isStageSkipDecisionStage() const {
     if (controlPacket.stageSkipTarget == 0u)
         return false;
@@ -1183,6 +1328,16 @@ void WorkerLlmInference::evaluateStageSkipDecision() {
     hasLastSkipDecision = true;
     lastSkipDecisionScore = lastDeltaNorm;
     bool accept = lastDeltaNorm <= controlPacket.stageSkipTheta;
+    if (accept) {
+        if (controlPacket.stageSkipAlpha <= 0.0f) {
+            accept = false;
+        } else if (controlPacket.stageSkipAlpha < 1.0f) {
+            accept = deterministicStageSkipUnit(
+                controlPacket.position,
+                controlPacket.stageSkipTarget
+            ) < controlPacket.stageSkipAlpha;
+        }
+    }
     bool forceFullByRejectStreak = false;
     if (accept && skipConsecutiveAccepts >= controlPacket.stageSkipMaxConsecutive)
         accept = false;
@@ -1229,6 +1384,10 @@ void WorkerLlmInference::recordStageTiming(NnUint recvUs, NnUint fwdUs, NnUint s
         return;
     if (hasLastDeltaNorm)
         stageDeltaNorm.push_back(lastDeltaNorm);
+    if (hasLastActivationMetrics) {
+        stageCosine.push_back(lastActivationCosine);
+        stageNormRatio.push_back(lastActivationNormRatio);
+    }
     if (!isStageSkipDecisionStage())
         return;
     if (hasLastSkipDecision) {
@@ -1238,13 +1397,16 @@ void WorkerLlmInference::recordStageTiming(NnUint recvUs, NnUint fwdUs, NnUint s
         if (controlPacket.stageSkipLog == 1u) {
             const NnUint rejectStreakNow = skipRejectStreak;
             const NnUint consecNow = skipConsecutiveAccepts;
-            printf("🧪 [WORKER_SKIP_TOKEN] node=%u pp=%u pos=%u delta_norm=%.6f score=%.6f theta=%.6f accept=%u consecutive_skip=%u reject_streak=%u forced_full_total=%u mode=%s\n",
+            printf("🧪 [WORKER_SKIP_TOKEN] node=%u pp=%u pos=%u delta_norm=%.6f cosine=%.6f norm_ratio=%.6f score=%.6f theta=%.6f alpha=%.3f accept=%u consecutive_skip=%u reject_streak=%u forced_full_total=%u mode=%s\n",
                 nodeConfig->nodeIndex,
                 nodeConfig->ppRank,
                 controlPacket.position,
                 lastSkipDecisionScore,
+                lastActivationCosine,
+                lastActivationNormRatio,
                 lastSkipDecisionScore,
                 controlPacket.stageSkipTheta,
+                controlPacket.stageSkipAlpha,
                 lastSkipDecisionAccept,
                 consecNow,
                 rejectStreakNow,
@@ -1253,7 +1415,7 @@ void WorkerLlmInference::recordStageTiming(NnUint recvUs, NnUint fwdUs, NnUint s
         }
         if (skipLogFile != nullptr) {
             std::fprintf(skipLogFile,
-                "%llu\t%u\t%u\t%u\t%u\t%.6f\t%u\t%.6f\t%u\t%u\t%u\t%u\t%u\t%u\t%.3f\t%.3f\t-1\t-1\t\n",
+                "%llu\t%u\t%u\t%u\t%u\t%.6f\t%u\t%.6f\t%u\t%u\t%u\t%u\t%u\t%u\t%.3f\t%.3f\t%.3f\t%.6f\t%.6f\t%.6f\t%.6f\t-1\t-1\t\n",
                 skipLogRunId,
                 nodeConfig->nodeIndex,
                 nodeConfig->ppRank,
@@ -1269,7 +1431,12 @@ void WorkerLlmInference::recordStageTiming(NnUint recvUs, NnUint fwdUs, NnUint s
                 skipRejectStreak,
                 skipForcedFullByRejectStreak,
                 recvUs / 1000.0f,
-                totalUs / 1000.0f);
+                totalUs / 1000.0f,
+                controlPacket.stageSkipAlpha,
+                lastActivationCosine,
+                lastActivationNormRatio,
+                lastActivationCurrNorm,
+                lastActivationPrevNorm);
             std::fflush(skipLogFile);
         }
     }
@@ -1350,6 +1517,10 @@ void WorkerLlmInference::printStageTimingSummary() const {
     if (!stageDeltaNorm.empty()) {
         const float deltaP50 = percentileValue(stageDeltaNorm, 0.50f);
         const float deltaP95 = percentileValue(stageDeltaNorm, 0.95f);
+        const float cosineP50 = stageCosine.empty() ? 0.0f : percentileValue(stageCosine, 0.50f);
+        const float cosineP05 = stageCosine.empty() ? 0.0f : percentileValue(stageCosine, 0.05f);
+        const float normRatioP50 = stageNormRatio.empty() ? 0.0f : percentileValue(stageNormRatio, 0.50f);
+        const float normRatioP95 = stageNormRatio.empty() ? 0.0f : percentileValue(stageNormRatio, 0.95f);
         float acceptRate = 0.0f;
         float rejectRate = 0.0f;
         float fallbackRate = 0.0f;
@@ -1365,14 +1536,19 @@ void WorkerLlmInference::printStageTimingSummary() const {
             ? 0.0f
             : (float)std::accumulate(stageVerifierUs.begin(), stageVerifierUs.end(), 0.0) /
                 (1000.0f * (float)stageVerifierUs.size());
-        printf("🧪 [WORKER_SKIP_SUMMARY] node=%u pp=%u sp=%u n=%zu delta_norm(p50/p95)=%.6f/%.6f theta=%.6f accept_rate=%.4f reject_rate=%.4f fallback_rate=%.4f verifier_avg_ms=%.4f forced_full=%u target=%u mode=%s\n",
+        printf("🧪 [WORKER_SKIP_SUMMARY] node=%u pp=%u sp=%u n=%zu delta_norm(p50/p95)=%.6f/%.6f cosine(p05/p50)=%.6f/%.6f norm_ratio(p50/p95)=%.6f/%.6f theta=%.6f alpha=%.3f accept_rate=%.4f reject_rate=%.4f fallback_rate=%.4f verifier_avg_ms=%.4f forced_full=%u target=%u mode=%s\n",
             nodeConfig->nodeIndex,
             nodeConfig->ppRank,
             nodeConfig->spRank,
             stageDeltaNorm.size(),
             deltaP50,
             deltaP95,
+            cosineP05,
+            cosineP50,
+            normRatioP50,
+            normRatioP95,
             controlPacket.stageSkipTheta,
+            controlPacket.stageSkipAlpha,
             acceptRate,
             rejectRate,
             fallbackRate,
@@ -1400,6 +1576,7 @@ bool WorkerLlmInference::getLastPipelineSendStats(NnPipelineTransferStats *stats
 void WorkerLlmInference::beforeForward() {
     skipForwardThisToken = false;
     hasLastDeltaNorm = false;
+    hasLastActivationMetrics = false;
     if (pipeline.get() == nullptr || !pipeline->shouldRecvActivations())
         return;
 
@@ -1448,15 +1625,28 @@ void WorkerLlmInference::beforeForward() {
     if (stageSkipTrackingEnabled && decodeSingle) {
         if (hasPrevXPipeRow && prevXPipeRow.size() == xPipeRowBytes) {
             float deltaNorm = 0.0f;
-            if (computeDeltaNormEncoded(
+            float cosine = 0.0f;
+            float normRatio = 0.0f;
+            float currNorm = 0.0f;
+            float prevNorm = 0.0f;
+            if (computeActivationPairMetricsEncoded(
                 xPipe,
                 prevXPipeRow.data(),
                 xPipeRowBytes,
                 xPipeBufferType,
-                &deltaNorm
+                &deltaNorm,
+                &cosine,
+                &normRatio,
+                &currNorm,
+                &prevNorm
             )) {
                 hasLastDeltaNorm = true;
                 lastDeltaNorm = deltaNorm;
+                hasLastActivationMetrics = true;
+                lastActivationCosine = cosine;
+                lastActivationNormRatio = normRatio;
+                lastActivationCurrNorm = currNorm;
+                lastActivationPrevNorm = prevNorm;
             }
         }
         std::memcpy(prevXPipeRow.data(), xPipe, xPipeRowBytes);
@@ -1686,9 +1876,11 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
         args->ppStageSkip,
         args->ppStageSkipTarget,
         args->ppStageSkipTheta,
+        args->ppStageSkipAlpha,
         args->ppStageSkipMaxConsecutive,
         args->ppStageSkipMaxRejectStreak,
-        args->ppStageSkipLog
+        args->ppStageSkipLog,
+        args->ppStageSkipLogFile
     );
 
     if (network != nullptr) {
@@ -1731,10 +1923,11 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
             printf("🧮 Pipeline delta transport: ENABLED (minBytes=%u, wireDtype=%s)\n",
                 args->pipelineDeltaMinBytes, floatTypeToString(pipelineActivationType));
         if (args->ppStageSkipShadow || args->ppStageSkip) {
-            printf("🧪 PP stage-skip: mode=%s target=%u theta=%.6f maxConsecutive=%u maxRejectStreak=%u log=%s\n",
+            printf("🧪 PP stage-skip: mode=%s target=%u theta=%.6f alpha=%.3f maxConsecutive=%u maxRejectStreak=%u log=%s\n",
                 args->ppStageSkip ? "execute" : "shadow",
                 args->ppStageSkipTarget,
                 args->ppStageSkipTheta,
+                args->ppStageSkipAlpha,
                 args->ppStageSkipMaxConsecutive,
                 args->ppStageSkipMaxRejectStreak,
                 args->ppStageSkipLog ? "on" : "off");
@@ -1870,22 +2063,23 @@ void runWorkerApp(AppCliArgs *args) {
                         isTurboEnabled = true;
                         printf("🚁 Network is in non-blocking mode\n");
                     }
-                    const unsigned long long tRecv0 = args->stageTiming ? nowUs() : 0;
+                    const bool needsWorkerTokenTiming = args->stageTiming || inference.shouldRecordSkipLog();
+                    const unsigned long long tRecv0 = needsWorkerTokenTiming ? nowUs() : 0;
                     inference.beforeForward();
-                    const unsigned long long tRecv1 = args->stageTiming ? nowUs() : 0;
+                    const unsigned long long tRecv1 = needsWorkerTokenTiming ? nowUs() : 0;
                     executor.setDecodePhase(inference.isDecodePhase());
-                    const unsigned long long tFwd0 = args->stageTiming ? nowUs() : 0;
+                    const unsigned long long tFwd0 = needsWorkerTokenTiming ? nowUs() : 0;
                     if (!inference.shouldSkipForward())
                         executor.forward();
-                    const unsigned long long tFwd1 = args->stageTiming ? nowUs() : 0;
+                    const unsigned long long tFwd1 = needsWorkerTokenTiming ? nowUs() : 0;
                     if (args->stageTiming && !inference.shouldSkipForward()) {
                         NnExecutorOpBreakdown opBreakdown;
                         if (executor.getLastForwardOpBreakdown(&opBreakdown))
                             inference.recordOpTiming(opBreakdown);
                     }
                     inference.afterForward();
-                    const unsigned long long tSend1 = args->stageTiming ? nowUs() : 0;
-                    if (args->stageTiming) {
+                    const unsigned long long tSend1 = needsWorkerTokenTiming ? nowUs() : 0;
+                    if (needsWorkerTokenTiming) {
                         inference.recordStageTiming(
                             (NnUint)(tRecv1 - tRecv0),
                             (NnUint)(tFwd1 - tFwd0),

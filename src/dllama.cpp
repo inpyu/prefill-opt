@@ -23,6 +23,8 @@ struct CbRequestState {
     NnUint maxPos;
     int token;
     bool finished;
+    std::string generatedText;
+    NnUint generatedTokens;
 };
 
 static std::vector<std::string> loadPromptsFromFile(const char *path) {
@@ -164,51 +166,132 @@ static void inferenceContinuousBatching(AppInferenceContext *context) {
         st.tokens.assign(inputTokensVec.begin(), inputTokensVec.begin() + nInputTokens);
         st.nInputTokens = (NnUint)nInputTokens;
         st.pos = 0;
-        st.maxPos = std::min(context->header->seqLen, context->args->steps);
+        NnUint maxPos = std::min(context->header->seqLen, context->args->steps);
+        if (context->args->decodeCbMaxNewTokens > 0) {
+            const NnUint byNewTokens = (NnUint)nInputTokens + context->args->decodeCbMaxNewTokens;
+            maxPos = std::min(maxPos, byNewTokens);
+        }
+        st.maxPos = maxPos;
         st.token = st.tokens[0];
         st.finished = false;
+        st.generatedText = "";
+        st.generatedTokens = 0;
         reqs.push_back(std::move(st));
     }
 
-    // Prefill each request (sequential), then decode in batched rounds.
-    context->inference->setDecodePhase(false);
-    NnUint prefillTokensTotal = 0;
-    Timer wallClock;
-    for (size_t r = 0; r < reqs.size(); r++) {
-        CbRequestState &req = reqs[r];
-        const NnUint nPrefillTokens = req.nInputTokens > 0 ? (req.nInputTokens - 1) : 0;
-        const NnUint prefillBatchCap = resolvePrefillChunkBatchSize(context->args, nPrefillTokens);
-        while (req.pos + 1 < req.nInputTokens) {
-            NnUint remainingTokens = req.nInputTokens - 1 - req.pos;
-            NnUint batchSize = remainingTokens < prefillBatchCap ? remainingTokens : prefillBatchCap;
-            context->inference->setBatchSize(batchSize);
-            context->inference->setPosition(req.pos);
-            for (NnUint i = 0; i < batchSize; i++)
-                context->inference->setToken(i, req.tokens[req.pos + i]);
-            context->inference->forward();
-            req.pos += batchSize;
-            req.token = req.tokens[req.pos];
-            prefillTokensTotal += batchSize;
-        }
+    std::ofstream cbDump;
+    if (context->args->cleanOutputPrefix != nullptr) {
+        const std::string cbPath = std::string(context->args->cleanOutputPrefix) + ".cb.tsv";
+        if (fileExists(cbPath))
+            throw std::runtime_error("Continuous batching dump would overwrite existing file: " + cbPath);
+        if (!ensureParentDirectoryForFileLocal(cbPath))
+            throw std::runtime_error("Cannot create parent directory for continuous batching dump: " + cbPath);
+        cbDump.open(cbPath.c_str(), std::ios::out | std::ios::binary);
+        if (!cbDump.is_open())
+            throw std::runtime_error("Cannot open continuous batching dump: " + cbPath);
+        cbDump << "request_index\tprompt_tokens\tgenerated_tokens\tfinished\ttext\n";
     }
 
-    context->inference->setDecodePhase(true);
-    context->tokenizer->resetDecoder();
-
+    NnUint prefillTokensTotal = 0;
     NnUint totalPredTokens = 0;
+    Timer wallClock;
+
+    bool cbRowsDumpedIncrementally = false;
+    if (maxActive == 1u) {
+        cbRowsDumpedIncrementally = true;
+        for (size_t r = 0; r < reqs.size(); r++) {
+            CbRequestState &req = reqs[r];
+            context->inference->setDecodePhase(false);
+            const NnUint nPrefillTokens = req.nInputTokens > 0 ? (req.nInputTokens - 1) : 0;
+            const NnUint prefillBatchCap = resolvePrefillChunkBatchSize(context->args, nPrefillTokens);
+            while (req.pos + 1 < req.nInputTokens) {
+                NnUint remainingTokens = req.nInputTokens - 1 - req.pos;
+                NnUint batchSize = remainingTokens < prefillBatchCap ? remainingTokens : prefillBatchCap;
+                context->inference->setBatchSize(batchSize);
+                context->inference->setPosition(req.pos);
+                for (NnUint i = 0; i < batchSize; i++)
+                    context->inference->setToken(i, req.tokens[req.pos + i]);
+                context->inference->forward();
+                req.pos += batchSize;
+                req.token = req.tokens[req.pos];
+                prefillTokensTotal += batchSize;
+            }
+
+            context->inference->setBatchSize(1);
+            context->inference->setDecodePhase(true);
+            context->tokenizer->resetDecoder();
+            while (!req.finished && req.pos < req.maxPos) {
+                context->inference->setPosition(req.pos);
+                context->inference->setToken(0, req.token);
+                context->inference->forward();
+
+                int nextToken = context->inference->sampleToken(context->sampler);
+                char *piece = context->tokenizer->decode(nextToken);
+                if (piece != nullptr)
+                    req.generatedText += piece;
+                req.token = nextToken;
+                req.pos++;
+                req.generatedTokens++;
+                totalPredTokens++;
+                if (context->tokenizer->isEos(nextToken) || req.pos >= req.maxPos)
+                    req.finished = true;
+            }
+            if (cbDump.is_open()) {
+                cbDump << r << '\t'
+                       << req.nInputTokens << '\t'
+                       << req.generatedTokens << '\t'
+                       << (req.finished ? 1 : 0) << '\t'
+                       << escapeTsv(req.generatedText.c_str()) << '\n';
+                cbDump.flush();
+            }
+        }
+    } else {
+        // Prefill each request (sequential), then decode in batched rounds.
+        context->inference->setDecodePhase(false);
+        for (size_t r = 0; r < reqs.size(); r++) {
+            CbRequestState &req = reqs[r];
+            const NnUint nPrefillTokens = req.nInputTokens > 0 ? (req.nInputTokens - 1) : 0;
+            const NnUint prefillBatchCap = resolvePrefillChunkBatchSize(context->args, nPrefillTokens);
+            while (req.pos + 1 < req.nInputTokens) {
+                NnUint remainingTokens = req.nInputTokens - 1 - req.pos;
+                NnUint batchSize = remainingTokens < prefillBatchCap ? remainingTokens : prefillBatchCap;
+                context->inference->setBatchSize(batchSize);
+                context->inference->setPosition(req.pos);
+                for (NnUint i = 0; i < batchSize; i++)
+                    context->inference->setToken(i, req.tokens[req.pos + i]);
+                context->inference->forward();
+                req.pos += batchSize;
+                req.token = req.tokens[req.pos];
+                prefillTokensTotal += batchSize;
+            }
+        }
+
+        context->inference->setDecodePhase(true);
+        context->tokenizer->resetDecoder();
+
     NnUint activeCount = (NnUint)reqs.size();
     NnUint rrCursor = 0;
     while (activeCount > 0) {
         std::vector<NnUint> picked;
         picked.reserve(maxActive);
-        for (NnUint i = 0; i < (NnUint)reqs.size() && picked.size() < maxActive; i++) {
-            NnUint idx = (rrCursor + i) % (NnUint)reqs.size();
-            if (!reqs[idx].finished && reqs[idx].pos < reqs[idx].maxPos)
-                picked.push_back(idx);
+        if (maxActive == 1u) {
+            for (NnUint idx = 0; idx < (NnUint)reqs.size(); idx++) {
+                if (!reqs[idx].finished && reqs[idx].pos < reqs[idx].maxPos) {
+                    picked.push_back(idx);
+                    break;
+                }
+            }
+        } else {
+            for (NnUint i = 0; i < (NnUint)reqs.size() && picked.size() < maxActive; i++) {
+                NnUint idx = (rrCursor + i) % (NnUint)reqs.size();
+                if (!reqs[idx].finished && reqs[idx].pos < reqs[idx].maxPos)
+                    picked.push_back(idx);
+            }
         }
         if (picked.empty())
             break;
-        rrCursor = (picked.back() + 1u) % (NnUint)reqs.size();
+        if (maxActive != 1u)
+            rrCursor = (picked.back() + 1u) % (NnUint)reqs.size();
 
         std::vector<NnUint> positions(picked.size());
         for (NnUint i = 0; i < (NnUint)picked.size(); i++) {
@@ -224,13 +307,30 @@ static void inferenceContinuousBatching(AppInferenceContext *context) {
         for (NnUint i = 0; i < (NnUint)picked.size(); i++) {
             CbRequestState &req = reqs[picked[i]];
             int nextToken = context->inference->sampleTokenAtBatch(context->sampler, i);
+            char *piece = context->tokenizer->decode(nextToken);
+            if (piece != nullptr)
+                req.generatedText += piece;
             req.token = nextToken;
             req.pos++;
+            req.generatedTokens++;
             totalPredTokens++;
             if (context->tokenizer->isEos(nextToken) || req.pos >= req.maxPos) {
                 req.finished = true;
                 activeCount--;
+                context->tokenizer->resetDecoder();
             }
+        }
+    }
+    }
+
+    if (cbDump.is_open() && !cbRowsDumpedIncrementally) {
+        for (NnUint i = 0; i < (NnUint)reqs.size(); i++) {
+            const CbRequestState &req = reqs[i];
+            cbDump << i << '\t'
+                   << req.nInputTokens << '\t'
+                   << req.generatedTokens << '\t'
+                   << (req.finished ? 1 : 0) << '\t'
+                   << escapeTsv(req.generatedText.c_str()) << '\n';
         }
     }
 
@@ -274,6 +374,17 @@ static void inference(AppInferenceContext *context) {
     NnUint predTotalTime = 0;
     NnUint evalExecTime = 0;
     NnUint evalSyncTime = 0;
+    // EXP-1: prefill 구간의 sync를 wait(peer 대기)/xfer(실제 전송)로 분리 적산.
+    unsigned long long prefillSyncWaitUs = 0;
+    unsigned long long prefillSyncXferUs = 0;
+    // EXP-1/H2: prefill 구간 op 분류별 적산 (attnCore = O(S^2) 항).
+    unsigned long long prefillAttnCoreUs = 0;
+    unsigned long long prefillAttnProjUs = 0;
+    unsigned long long prefillFfnUs = 0;
+    unsigned long long prefillNormUs = 0;
+    unsigned long long prefillLmHeadUs = 0;
+    unsigned long long prefillOtherOpUs = 0;
+    bool prefillOpProfilingOn = false;
     NnUint predExecTime = 0;
     NnUint predSyncTime = 0;
     NnSize kvTxTotalBytes = 0;
@@ -331,6 +442,14 @@ static void inference(AppInferenceContext *context) {
 
     NnUint waveChunkCount = 0; // wave 모드에서 드레인 대기 중인 chunk 수
     context->inference->setDecodePhase(false);
+    // EXP-1: 프리필 진입 전에 wait/xfer 누적을 초기화한다(모델 로딩/핸드셰이크 잔여 제거).
+    if (context->network != nullptr)
+        context->network->resetSyncTimeBreakdown();
+    // EXP-1/H2: root에서도 op 단위 프로파일링을 켠다(--stage-timing 1 일 때만).
+    if (context->args->stageTiming) {
+        context->executor->setStepProfilingEnabled(true);
+        prefillOpProfilingOn = true;
+    }
 
     for (;;) {
         long remainingTokens = nInputTokens - 1 - (long)pos;
@@ -353,6 +472,20 @@ static void inference(AppInferenceContext *context) {
         }
         prefillChunkCount++;
         prefillChunkTokenTotal += batchSize;
+
+        // EXP-1/H2: 청크 forward 직후에만 op breakdown이 유효하다.
+        // wave 모드는 forward가 비동기로 끝나지 않으므로 집계 대상에서 제외한다.
+        if (prefillOpProfilingOn && !useWave) {
+            NnExecutorOpBreakdown ob;
+            if (context->executor->getLastForwardOpBreakdown(&ob)) {
+                prefillAttnCoreUs += ob.attnCoreUs;
+                prefillAttnProjUs += (ob.attnUs >= ob.attnCoreUs) ? (ob.attnUs - ob.attnCoreUs) : 0u;
+                prefillFfnUs += ob.ffnUs;
+                prefillNormUs += ob.normUs;
+                prefillLmHeadUs += ob.lmHeadUs;
+                prefillOtherOpUs += ob.otherUs;
+            }
+        }
 
         pos += batchSize;
         token = inputTokens[pos];
@@ -379,6 +512,13 @@ static void inference(AppInferenceContext *context) {
             evalExecTime += evalTime;
             evalSyncTime += syncTime;
             evalTotalTime += evalTime + syncTime;
+            if (context->network != nullptr) {
+                unsigned long long wUs = 0, xUs = 0;
+                context->network->getSyncTimeBreakdown(&wUs, &xUs);
+                prefillSyncWaitUs += wUs;
+                prefillSyncXferUs += xUs;
+                context->network->resetSyncTimeBreakdown();
+            }
             kvTxTotalBytes += breakdown.kvTxBytes;
             kvRxTotalBytes += breakdown.kvRxBytes;
             activationTxTotalBytes += breakdown.activationTxBytes;
@@ -412,6 +552,13 @@ static void inference(AppInferenceContext *context) {
         evalExecTime += evalTime;
         evalSyncTime += syncTime;
         evalTotalTime += evalTime + syncTime;
+        if (context->network != nullptr) {
+            unsigned long long wUs = 0, xUs = 0;
+            context->network->getSyncTimeBreakdown(&wUs, &xUs);
+            prefillSyncWaitUs += wUs;
+            prefillSyncXferUs += xUs;
+            context->network->resetSyncTimeBreakdown();
+        }
         kvTxTotalBytes += breakdown.kvTxBytes;
         kvRxTotalBytes += breakdown.kvRxBytes;
         activationTxTotalBytes += breakdown.activationTxBytes;
@@ -558,6 +705,21 @@ static void inference(AppInferenceContext *context) {
         predTotalTimeMs / ((float) nPredTokens));
     printf("Timing\n");
     printf("  prefillMs: %3.2f\n", prefillWallUs / 1000.0f);
+    // EXP-1: H1 판정용. syncWait은 peer 대기(straggler), syncXfer는 실제 바이트 이동.
+    printf(" syncWaitMs: %3.2f\n", prefillSyncWaitUs / 1000.0f);
+    printf(" syncXferMs: %3.2f\n", prefillSyncXferUs / 1000.0f);
+    if (prefillOpProfilingOn) {
+        // EXP-1/H2 판정용. attnMs는 O(S^2) 항만, gemmMs는 projection+FFN+lm_head.
+        const unsigned long long gemmUs =
+            prefillAttnProjUs + prefillFfnUs + prefillLmHeadUs;
+        printf("     attnMs: %3.2f\n", prefillAttnCoreUs / 1000.0f);
+        printf("     gemmMs: %3.2f\n", gemmUs / 1000.0f);
+        printf("   attnProjMs: %3.2f\n", prefillAttnProjUs / 1000.0f);
+        printf("        ffnMs: %3.2f\n", prefillFfnUs / 1000.0f);
+        printf("       normMs: %3.2f\n", prefillNormUs / 1000.0f);
+        printf("     lmHeadMs: %3.2f\n", prefillLmHeadUs / 1000.0f);
+        printf("      otherMs: %3.2f\n", prefillOtherOpUs / 1000.0f);
+    }
     printf("     ttftMs: %3.2f\n", (hasFirstPredToken ? ttftWallUs : prefillWallUs) / 1000.0f);
     printf("   decodeMs: %3.2f\n", decodeWallUs / 1000.0f);
     printf("    totalMs: %3.2f\n", totalWallUs / 1000.0f);
@@ -763,6 +925,7 @@ static void printUsage() {
     printf("  --prompts-file <path>       Enable multi-request continuous batching input (1 prompt per line)\n");
     printf("  --clean-output-prefix <path_prefix>  Write generated tokens/text to <prefix>.tokens.tsv and <prefix>.text without overwriting\n");
     printf("  --decode-cb-max-active <n>  Max active requests per decode step in continuous batching (default: nBatches)\n");
+    printf("  --decode-cb-max-new-tokens <n>  Max generated tokens per request in prompts-file mode (0: use --steps)\n");
     printf("  --workers <host:port> [host:port ...]\n");
     printf("  --collective <auto|star|ring>\n");
     printf("  --pp-size <n>\n");
@@ -779,6 +942,7 @@ static void printUsage() {
     printf("  --pp-stage-skip <0|1>         Execute stage skip routing (default: 0)\n");
     printf("  --pp-stage-skip-target <rank> Skip target PP rank (default: 4)\n");
     printf("  --pp-stage-skip-theta <f>     Gate+verifier threshold on delta_norm (default: 0.10)\n");
+    printf("  --pp-stage-skip-alpha <f>     Deterministic bypass strength in [0,1] after gate pass (default: 1.0)\n");
     printf("  --pp-stage-skip-verifier <delta>  Verifier type (v1 supports only: delta)\n");
     printf("  --pp-stage-skip-max-consecutive <n>  Safety cap for consecutive skip decisions (default: 3)\n");
     printf("  --pp-stage-skip-max-reject-streak <n> Safety cap for reject streak before dampening (default: 8)\n");

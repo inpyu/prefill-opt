@@ -680,6 +680,8 @@ NnNetwork::NnNetwork(std::vector<NnSocket> *sockets) {
     this->activationTxBytes.store(0);
     this->activationRxBytes.store(0);
     this->kvMigrationViolations.store(0);
+    this->syncWaitUs.store(0);
+    this->syncXferUs.store(0);
     for (NnUint i = 0; i < nSockets; i++) {
         this->sentBytes[i] = 0;
         this->recvBytes[i] = 0;
@@ -780,6 +782,8 @@ void NnNetwork::writeMany(NnUint n, NnSocketIo *ios) {
         sentOperations[io->socketIndex]++;
     }
     do {
+        // EXP-1: readMany와 동일 규칙. 바이트가 움직인 패스는 xfer, 아니면 wait(수신측 back-pressure).
+        auto passStart = std::chrono::high_resolution_clock::now();
         isWriting = false;
         bool hasProgress = false;
         NnSize pendingBytes = 0;
@@ -806,6 +810,16 @@ void NnNetwork::writeMany(NnUint n, NnSocketIo *ios) {
             }
         }
 
+        {
+            auto passEnd = std::chrono::high_resolution_clock::now();
+            unsigned long long passUs = (unsigned long long)
+                std::chrono::duration_cast<std::chrono::microseconds>(passEnd - passStart).count();
+            if (hasProgress)
+                syncXferUs.fetch_add(passUs, std::memory_order_relaxed);
+            else if (isWriting)
+                syncWaitUs.fetch_add(passUs, std::memory_order_relaxed);
+        }
+
         if (isWriting && !hasProgress) {
             auto now = std::chrono::steady_clock::now();
             long long stallMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(now - lastProgressTime).count();
@@ -830,7 +844,10 @@ void NnNetwork::writeMany(NnUint n, NnSocketIo *ios) {
                 fflush(stdout);
                 lastLogTime = now;
             }
+            auto sleepStart = std::chrono::high_resolution_clock::now();
             sleepOnSocketRetry();
+            syncWaitUs.fetch_add((unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now() - sleepStart).count(), std::memory_order_relaxed);
         } else if (hasProgress) {
             lastProgressTime = std::chrono::steady_clock::now();
         }
@@ -865,6 +882,8 @@ void NnNetwork::readMany(NnUint n, NnSocketIo *ios) {
         nBytes += io->size;
     }
     do {
+        // EXP-1: 이 패스에서 바이트가 실제로 움직였는지에 따라 xfer/wait로 나눠 적산한다.
+        auto passStart = std::chrono::high_resolution_clock::now();
         isReading = false;
         bool hasProgress = false;
         NnSize pendingBytes = 0;
@@ -887,6 +906,16 @@ void NnNetwork::readMany(NnUint n, NnSocketIo *ios) {
                 io->data = (char*)io->data + r;
                 hasProgress = true;
             }
+        }
+
+        {
+            auto passEnd = std::chrono::high_resolution_clock::now();
+            unsigned long long passUs = (unsigned long long)
+                std::chrono::duration_cast<std::chrono::microseconds>(passEnd - passStart).count();
+            if (hasProgress)
+                syncXferUs.fetch_add(passUs, std::memory_order_relaxed);
+            else if (isReading)
+                syncWaitUs.fetch_add(passUs, std::memory_order_relaxed);
         }
 
         if (isReading && !hasProgress) {
@@ -913,12 +942,16 @@ void NnNetwork::readMany(NnUint n, NnSocketIo *ios) {
                 fflush(stdout);
                 lastLogTime = now;
             }
+            // EXP-1: 재시도 sleep도 peer 대기 시간이다.
+            auto sleepStart = std::chrono::high_resolution_clock::now();
             sleepOnSocketRetry();
+            syncWaitUs.fetch_add((unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now() - sleepStart).count(), std::memory_order_relaxed);
         } else if (hasProgress) {
             lastProgressTime = std::chrono::steady_clock::now();
         }
     } while (isReading);
-    
+
     auto endTime = std::chrono::high_resolution_clock::now();
     recordOperation("readMany", 0, nBytes, startTime, endTime);
 }
@@ -967,6 +1000,18 @@ void NnNetwork::resetStats() {
     activationTxBytes.store(0, std::memory_order_relaxed);
     activationRxBytes.store(0, std::memory_order_relaxed);
     kvMigrationViolations.store(0, std::memory_order_relaxed);
+    syncWaitUs.store(0, std::memory_order_relaxed);
+    syncXferUs.store(0, std::memory_order_relaxed);
+}
+
+void NnNetwork::getSyncTimeBreakdown(unsigned long long *waitUs, unsigned long long *xferUs) {
+    *waitUs = syncWaitUs.load(std::memory_order_relaxed);
+    *xferUs = syncXferUs.load(std::memory_order_relaxed);
+}
+
+void NnNetwork::resetSyncTimeBreakdown() {
+    syncWaitUs.store(0, std::memory_order_relaxed);
+    syncXferUs.store(0, std::memory_order_relaxed);
 }
 
 void NnNetwork::printSocketTrafficSummary(NnUint socketIndex, const char *label) const {
