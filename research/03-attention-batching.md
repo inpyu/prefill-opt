@@ -103,11 +103,79 @@ SBC에서는 O(S²) *메모리 트래픽* 을 줄이는 것이고 SBC는 대역�
    → 아직 미착수. 로컬에 llama.cpp 없음
 3. 분산 실험 baseline 은 **수정본 + llama.cpp RPC 둘 다**
 
+## 6.5. 발견 #3 (부수적): 토큰 임베딩이 F32로 저장된다
+
+`src/llm.cpp:196` — `n.tokenEmbeddingSize = size2D(F_32, h->vocabSize, h->dim)`
+
+| | dllama `.m` | GGUF Q4_0 |
+|---|---|---|
+| 레이어 가중치 | Q4_0 | Q4_0 |
+| lm_head (`final_matmul_logits`) | Q4_0 | Q4_0 |
+| **토큰 임베딩** | **F32 (2.10 GB)** | Q4_0 (0.30 GB) |
+| 합계 | **6.32 GB** | 4.34 GB |
+
+계산이 정확히 맞는다: 전체 Q4_0 이면 8.03e9 × 4.5bit = 4.52 GB,
+임베딩만 F32 로 바꾸면 4.52 − 0.30 + 2.10 = 6.32 GB.
+
+**prefill 연산 성능에는 영향이 없다** — 임베딩은 `OP_EMBEDDING`(행 복사 룩업)이고
+연산 경로가 아니다. 따라서 llama.cpp 와의 tok/s 비교 공정성도 유지된다.
+
+**그러나 설계 선택지에 영향이 크다.** CP(context parallel)는 각 노드가 전체 가중치를
+들고 있어야 하는데, Pi5 8GB 에서 6.32 GB 면 KV 캐시(S=2048 에 512 MB)를 올릴 여유가
+사실상 없다. **4.34 GB 로 줄이면 CP 가 실제로 가능해진다.**
+→ 성능 최적화가 아니라 **설계 공간을 여는 수정**이다.
+
+## 6.6. llama.cpp 빌드 설정 대조 (발견 #1 의 근거)
+
+llama.cpp CMake 출력:
+
+```
+-- ARM detected flags: -mcpu=cortex-a76+crc+crypto
+-- Performing Test GGML_MACHINE_SUPPORTS_dotprod - Success
+```
+
+llama.cpp 는 `-mcpu=` 를 쓰고 **dotprod 지원을 컴파일 타임에 명시적으로 테스트**한다.
+우리가 `-mtune=native` 로 이를 무력화하고 있던 것과 대조적이며,
+발견 #1 이 distributed-llama 고유 문제라는 직접 근거다.
+→ 논문의 artifact/reproducibility 섹션에 쓸 수 있다.
+
 ## 7. 검증 상태
 
 - [x] 원인 규명 (메모리 트래픽 추정이 실측과 같은 자릿수)
 - [x] `multiheadAttBatch_F32` 구현 및 빌드
-- [ ] 정확성 검증 (동일 시드/온도에서 출력 토큰 일치) — 진행 중
-- [ ] 성능 측정 (S=512, S=2048) — 진행 중
-- [ ] llama.cpp 대조
+- [x] **정확성 검증** — seed 42 / temp 0 에서 출력 **byte-for-byte 동일** (md5 일치)
+- [x] **성능 측정**
+
+  | | S=447 | S=1789 |
+  |---|---|---|
+  | attention | 10.4 s → **2.8 s (3.65×)** | 355.6 s → **41.9 s (8.49×)** |
+  | prefill 전체 | 78.2 s → 72.9 s (1.07×) | 624.2 s → **315.7 s (1.98×)** |
+  | ms/tok | 175 → 163 | 349 → **176** |
+  | attn 비중 | 13.3 % → 3.9 % | 57.0 % → 13.3 % |
+
+  수정 전 원본 대비 누적 **496 → 176 ms/tok (2.8×)**.
+  ms/tok 이 S=447(163)과 S=1789(176)에서 거의 평평해졌다 —
+  **prefill 비용이 S 에 대해 다시 선형에 가까워졌다**는 뜻이고 이것이 정상 동작이다.
+
+  > ⚠️ **H2 재정정**: "S≈1400 에서 attention 이 역전된다"는 앞선 관찰은
+  > **깨진 커널이 만든 인공물이었다.** 정상 커널에서는 S=1789 에서도 13.3% 다.
+  > SBC 실사용 구간(≤2K)에서 prefill 은 **FFN 이 지배(63.8%)** 하며,
+  > 따라서 분할 축 선택이 논문의 메인이 된다.
+
+- [ ] llama.cpp 대조 — 진행 중 (llama.cpp 빌드 완료, GGUF Q4_0 4.34 GB 확보)
 - [ ] 워커 노드 재배포 (`prefill_bench/redeploy_workers.sh`)
+
+## 8. 남은 갭 (llama.cpp 대비 예상 요인)
+
+attention 41.9 s 는 이론 하한(110 GFLOPS 기준 7.6 s)의 **약 5.5배**다.
+47배에서 크게 좁혔지만 남은 원인은 특정되어 있다.
+
+1. **`att` 중간 버퍼 실체화** — batchSize 32 × nHeads 32 × seqLen 2048 × 4 B =
+   **8.4 MB/청크** 를 쓰고→읽고(softmax)→다시 읽는다(AV).
+   llama.cpp 는 `ggml_flash_attn_ext` 로 융합(online softmax)한다. → 추가 2~3× 여지
+2. **KV 캐시 F32** — llama.cpp 기본은 F16. 트래픽 2배 차이
+3. **fp32 dot product** — GEMM 은 int8 dotprod(110 GFLOPS)인데
+   attention 은 fp32 NEON(피크 76.8 GFLOPS)
+
+단 attention 이 이미 13.3% 이므로 2.5× 더 개선해도 prefill 전체로는 8% 남짓이다.
+**FFN 63.8% 가 더 큰 레버이며, FFN 은 이미 sgemm 포화 상태라 알고리즘 레벨 접근이 필요하다.**

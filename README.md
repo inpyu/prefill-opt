@@ -1,189 +1,130 @@
-# Layer Skip Bypass
+# prefill-opt
 
-`layer-skip-bypass` is a research fork of
-[Distributed Llama](https://github.com/b4rtaz/distributed-llama) for studying
-pipeline-parallel LLM inference with stage-level layer bypass.
+SBC(Raspberry Pi 급) 커머디티 클러스터에서 **prefill / TTFT** 를 최적화하기 위한 연구용 포크.
+[distributed-llama](https://github.com/b4rtaz/distributed-llama) 기반이며,
+선행 프로젝트 [layer-skip-bypass](https://github.com/inpyu/layer-skip-bypass)(PiPP, decode 구간)와
+달리 **prefill 구간**을 대상으로 한다.
 
-The base runtime keeps Distributed Llama's root/worker execution model, model
-conversion tools, CPU/Vulkan backends, and tensor-parallel communication. This
-fork adds pipeline-parallel instrumentation and an experimental PP stage skip
-path that can bypass a selected pipeline stage when a delta-based verifier
-accepts the current token.
+전제 환경: GPU 없음 / CPU only / 1GbE 이더넷 / 프롬프트 0.5~4K 구간.
 
-## Goals
+---
 
-- Reduce decode latency in communication-bound multi-node inference.
-- Measure per-stage receive, forward, send, and wall-clock costs.
-- Evaluate shadow-only skip decisions before enabling real skip routing.
-- Log token-level skip decisions for threshold tuning and safety analysis.
+## 디렉터리
 
-## Repository Layout
+| 경로 | 내용 |
+|---|---|
+| `src/` | dllama 소스 (distributed-llama 포크) |
+| `research/` | **연구 문서 — 여기부터 읽을 것** |
+| `prefill_bench/` | prefill 실험 하네스 (스윕 · 파싱 · 마이크로벤치) |
+| `scripts/` | 워커 노드 운영 및 분산 실행 스크립트 |
+| `converter/` | HuggingFace / 토크나이저 변환 도구 (upstream) |
+| `prompts_gen/` | 길이별 생성 프롬프트 (gitignore, `make_prompts.py` 로 재생성) |
+| `bench_prefill/` | 실험 산출물 (gitignore) |
 
-- `src/` - C++ runtime, CLI, model execution, networking, and pipeline logic.
-- `src/nn/nn-pipeline.*` - stage-to-stage activation transfer and bypass
-  marker handling.
-- `converter/` - Hugging Face and tokenizer conversion utilities.
-- `scripts/` - local experiment and deployment helpers.
+### research/ 읽는 순서
 
-## Build
+| 문서 | 내용 |
+|---|---|
+| [00-RESEARCH-PLAN.md](research/00-RESEARCH-PLAN.md) | 문제 정의, 가설 H1~H5, 기여 구조, 타겟 학회 |
+| [01-EXP1-cost-breakdown.md](research/01-EXP1-cost-breakdown.md) | prefill 비용 분해 실험 프로토콜 |
+| [02-baseline-dotprod-fix.md](research/02-baseline-dotprod-fix.md) | 발견 #1 — `-mtune=native` 가 dotprod 를 무력화 |
+| [03-attention-batching.md](research/03-attention-batching.md) | 발견 #2 — prefill attention 의 KV 재스트리밍 |
+| [04-reading-path.md](research/04-reading-path.md) | 단계별 논문 학습 경로 |
+| [05-kvcache-ttft-guide.md](research/05-kvcache-ttft-guide.md) | KV 캐시 생성 · TTFT 요소 · 분산 절차 가이드 |
+
+---
+
+## 빌드
 
 ```bash
 make dllama
 ```
 
-Useful test targets:
+테스트 타깃: `make nn-cpu-test`, `nn-cpu-ops-test`, `nn-topology-test`, `nn-pipeline-test`
+
+> **aarch64 주의**: `Makefile` 은 aarch64 에서 `-mcpu=native` 를 쓴다.
+> `-march=native -mtune=native` 조합은 `__ARM_FEATURE_DOTPROD` 를 없애
+> `llamafile_sgemm` 의 Q40×Q80 배치 경로를 통째로 비활성화하고,
+> prefill 이 토큰별 matvec 폴백으로 떨어진다.
+> → [research/02](research/02-baseline-dotprod-fix.md)
+
+## 모델
+
+모델·토크나이저(`.m` / `.t`)는 **커밋하지 않는다.** 심볼릭 링크로 관리한다.
 
 ```bash
-make nn-cpu-test
-make nn-cpu-ops-test
-make nn-topology-test
-make nn-pipeline-test
+ln -sf /path/to/dllama_model_llama3-8b_q40.m  dllama_model_llama3-8b_q40.m
+ln -sf /path/to/dllama_tokenizer_llama3.t     dllama_tokenizer_llama3.t
 ```
 
-The code is intended to remain portable across Linux, macOS, Windows, ARM64,
-and x86_64 where the upstream project is supported.
-
-## Basic Inference
-
-Start a worker:
+## 기본 실행
 
 ```bash
-./dllama worker --port 9999 --nthreads 4
-```
+# 워커
+./dllama worker --port 9998 --nthreads 4
 
-Run inference from the root node:
-
-```bash
+# root
 ./dllama inference \
   --model dllama_model_llama3-8b_q40.m \
-  --tokenizer dllama_tokenizer_llama3_8B.t \
-  --buffer-float-type q80 \
-  --prompt "Hello world" \
-  --steps 64 \
-  --nthreads 4 \
-  --collective auto \
-  --workers 100.78.3.114:9999
+  --tokenizer dllama_tokenizer_llama3.t \
+  --buffer-float-type q80 --nthreads 4 --collective auto \
+  --prompt "Hello world" --steps 64 \
+  --workers 165.194.19.103:9998
 ```
 
-For an 8-node run, pass seven worker endpoints after `--workers`.
-
-## Pipeline and Stage-Skip Options
-
-Core distributed options:
-
-| Option | Purpose |
-| --- | --- |
-| `--collective <auto|star|ring>` | Select tensor-parallel collective policy. |
-| `--pipeline-float-type <f32|f16|q40|q80>` | Stage activation transport dtype. Defaults to `--buffer-float-type`. |
-| `--pipeline-chunk-bytes <n>` | Split activation payloads into chunks. `0` disables chunking. |
-| `--pipeline-delta <0|1>` | Send activation deltas when possible. |
-| `--pipeline-delta-min-bytes <n>` | Minimum payload size for delta transport. |
-| `--stage-timing <0|1>` | Print per-stage timing for decode steps. |
-| `--pp-topk <n>` | Send top-k logits from the last PP stage in the decode fast path. |
-
-Experimental stage-skip options:
-
-| Option | Purpose |
-| --- | --- |
-| `--pp-stage-skip-shadow <0|1>` | Score skip decisions while still executing the full route. |
-| `--pp-stage-skip <0|1>` | Enable real skip routing. |
-| `--pp-stage-skip-target <rank>` | PP rank to bypass. Default is `4`. |
-| `--pp-stage-skip-theta <f>` | Delta-norm threshold for gate and verifier acceptance. Default is `0.10`. |
-| `--pp-stage-skip-verifier <delta>` | Verifier type. Current implementation supports `delta`. |
-| `--pp-stage-skip-max-consecutive <n>` | Force a full route after this many consecutive accepts. Default is `3`. |
-| `--pp-stage-skip-max-reject-streak <n>` | Dampens skip after repeated rejects. Default is `8`. |
-| `--pp-stage-skip-log <0|1>` | Print per-token skip information on the target stage. |
-| `--pp-stage-skip-log-file <prefix>` | Append TSV logs as `<prefix>.node<N>.tsv`. |
-
-Recommended workflow:
-
-1. Run baseline with skip disabled.
-2. Enable `--pp-stage-skip-shadow 1` and collect token-level logs.
-3. Tune `--pp-stage-skip-target` and `--pp-stage-skip-theta` from observed
-   accept, reject, fallback, and verifier-cost rates.
-4. Enable `--pp-stage-skip 1` only after shadow results are stable.
-
-Example shadow run:
+## 실험 실행
 
 ```bash
-./dllama inference \
-  --model dllama_model_llama3-8b_q40.m \
-  --tokenizer dllama_tokenizer_llama3_8B.t \
-  --buffer-float-type q80 \
-  --prompt "Hello world" \
-  --steps 64 \
-  --nthreads 4 \
-  --collective auto \
-  --stage-timing 1 \
-  --pp-stage-skip-shadow 1 \
-  --pp-stage-skip-target 4 \
-  --pp-stage-skip-theta 0.10 \
-  --pp-stage-skip-log-file skiplogs/run \
-  --workers 100.78.3.114:9999 100.68.147.68:9999
+cd prefill_bench
+vim env.sh                                   # 노드 IP · 모델 경로 · 스윕 범위
+
+python3 make_prompts.py --lengths 128,512,2048,8192 --out ../prompts_gen
+bash redeploy_workers.sh                     # 워커에 현재 빌드 배포 (필수)
+bash ../scripts/rpi_worker_run.sh            # worker-first: 워커를 root 보다 먼저 기동
+bash run_breakdown.sh                        # S x N x BW 스윕
+python3 parse_breakdown.py ../bench_prefill/<RUN_ID>
 ```
 
-Example execute run:
+`bench_sgemm.cpp` 는 모델 로딩 없이 sgemm 배치 스케일링만 재는 마이크로벤치다.
 
-```bash
-./dllama inference \
-  --model dllama_model_llama3-8b_q40.m \
-  --tokenizer dllama_tokenizer_llama3_8B.t \
-  --buffer-float-type q80 \
-  --prompt "Hello world" \
-  --steps 64 \
-  --nthreads 4 \
-  --collective auto \
-  --pp-stage-skip 1 \
-  --pp-stage-skip-target 4 \
-  --pp-stage-skip-theta 0.10 \
-  --workers 100.78.3.114:9999 100.68.147.68:9999
-```
+### 계측 플래그
 
-## Logs
+`--stage-timing 1` 을 주면 prefill 구간 분해가 출력된다.
 
-When `--pp-stage-skip-log-file <prefix>` is set, each node appends a TSV file
-with fields such as:
+| 항목 | 의미 |
+|---|---|
+| `syncWaitMs` | peer 대기 시간 (straggler) |
+| `syncXferMs` | 실제 바이트 이동 시간 |
+| `attnMs` | attention score/AV — O(S²) 항만 |
+| `gemmMs` | projection + FFN + lm_head |
+| `attnProjMs` / `ffnMs` / `normMs` / `lmHeadMs` | 세부 분해 |
 
-- `run_id`
-- `node`
-- `pp`
-- `pos`
-- `target_stage`
-- `delta_norm`
-- `gate_pass`
-- `verifier_score`
-- `verifier_pass`
-- `was_skip`
-- `fallback`
-- `consecutive_skip`
-- `reject_streak`
-- `recv_wait_ms`
-- `wall_step_ms`
-- `token_id`
-- `is_special`
-- `token_text`
+### 운영 규칙
 
-These logs are intended for threshold selection and for checking whether bypass
-decisions stay stable across prompts.
+- **worker-first** — sub 노드 워커를 항상 root 보다 먼저 기동한다
+- **재배포 필수** — 소스를 고쳤으면 `redeploy_workers.sh` 를 돌린다.
+  구버전이 남은 워커는 straggler 가 되어 `wait_frac` 측정을 오염시킨다
+- **동시 실행 금지** — 8B 모델을 두 프로세스가 동시에 올리면 OOM 이다
+- run 사이 쿨다운(기본 60s)을 줄이지 말 것 — 열 조건 정렬용
 
-## Model Files
+---
 
-Large converted model files and tokenizer files are ignored by git:
+## 현재 상태
 
-- `dllama_model_*.m`
-- `dllama_tokenizer_*.t`
+수정 완료 (모두 무손실, 출력 byte-for-byte 동일 검증):
 
-Use `launch.py` or the scripts in `converter/` to download or convert models
-locally.
+| | 내용 | 효과 |
+|---|---|---|
+| 발견 #1 | aarch64 dotprod 활성화 | GEMM 배치 32 에서 3.2~4.0× |
+| 발견 #2 | prefill attention 배치화 (GQA 그룹화 + 쿼리 타일링) | attention 최대 8.5× |
+| 누적 | llama3-8b_q40, Cortex-A76 4스레드, 단일 노드 | **496 → 176 ms/tok (2.8×)** |
 
-## Notes
+둘 다 distributed-llama 구현 이슈이며 **논문 기여가 아니라 baseline 위생**이다.
 
-- Stage skip is experimental and should be treated as an evaluation feature.
-- Shadow mode is the safest default for collecting evidence.
-- Worker binaries must match the root binary because protocol fields are shared
-  between root and workers.
-- This repository inherits the upstream MIT license from Distributed Llama.
+## 알려진 사항
 
-## License
-
-MIT. See `LICENSE`.
+- `--pp-stage-skip*` 계열 플래그는 선행 프로젝트(PiPP, decode 구간 skip)의 것이다.
+  **기본값 off 이며 prefill 측정에 영향을 주지 않는다.** 향후 prefill+decode 통합 시 재사용 가능.
+- 토큰 임베딩이 F32 로 저장되어 모델 파일이 GGUF Q4_0 대비 약 1.8 GB 크다
+  (`src/llm.cpp:196`). 연산 성능에는 영향이 없으나 노드당 메모리 여유를 잠식하며,
+  각 노드가 전체 가중치를 들어야 하는 context-parallel 구성의 제약이 된다.

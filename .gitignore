@@ -26,6 +26,18 @@ server
 *.md
 !README.md
 
-# Model and tokenizer files
+# 위의 광범위한 *.sh / *.md 무시 규칙 때문에 재현에 필요한 스크립트와 문서가
+# 레포에서 빠지는 문제가 있었다. 아래에서 명시적으로 되살린다.
+# (prefill_bench/ 와 research/ 는 각 디렉터리의 .gitignore 에서 되살림)
+!scripts/*.sh
+!.github/**/*.sh
+
+# Model and tokenizer files (심볼릭 링크로 관리 — layer-skip-bypass 참조)
 dllama_model_*.m
 dllama_tokenizer_*.t
+
+# 실험 산출물
+/bench_prefill/
+/prompts_gen/*.txt
+/llama.cpp/
+/models/
