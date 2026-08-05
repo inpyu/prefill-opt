@@ -807,6 +807,119 @@ static void multiheadAtt_F32(
     }
 }
 
+// Prefill 배치 어텐션.
+//
+// 기존 multiheadAtt_F32 는 쿼리 위치 1개를 전제로 만들어진 decode용 커널이고,
+// prefill 은 이를 배치 크기만큼 반복 호출한다. 그 결과 KV 캐시를
+//   (쿼리 토큰 수) x (kvMul) 번
+// 반복해서 스트리밍하게 되어, 긴 프롬프트에서 attention 이 memory-bandwidth bound 가 된다.
+// (S=1789 실측에서 attention 이 prefill 시간의 57% 를 차지)
+//
+// 여기서는 두 가지를 바꾼다. 연산 순서는 그대로라 수치 결과는 동일하다.
+//   (A) GQA 그룹화: 같은 KV 헤드를 공유하는 kvMul 개 쿼리 헤드를 함께 처리 → KV 읽기 1/kvMul
+//   (B) 쿼리 타일링: t 루프를 바깥으로 빼 배치 전체가 KV 한 번 읽기를 공유    → KV 읽기 1/batchSize
+//
+// 스레드 분할은 KV 그룹 수가 스레드 수 이상일 때만 그룹 단위로 하고(=A 적용),
+// 그렇지 않으면 기존처럼 헤드 단위로 나눈다(=B 만 적용). TP 로 헤드가 쪼개진
+// 구성에서 스레드가 놀지 않도록 하기 위함이다.
+static void multiheadAttBatch_F32(
+    NnByte **outputs, const float *query, const NnUint qSliceD0,
+    float *att, const float *keyCache, const float *valueCache,
+    const float *positions, const NnUint batchSize,
+    const NnUint nHeads, const NnUint nHeads0, const NnUint nKvHeads,
+    const NnUint kvDim0, const NnUint headDim, const NnUint seqLen,
+    const NnUint nThreads, const NnUint threadIndex)
+{
+    const NnUint kvMul = nHeads / nKvHeads;
+    const float headDimRoot = sqrtf(headDim);
+    const NnUint nGroups = (kvMul > 0u && nHeads0 % kvMul == 0u) ? (nHeads0 / kvMul) : 0u;
+    const bool groupSplit = nGroups >= nThreads && nGroups > 0u;
+
+    NnUint h0Begin, h0Limit, headStride;
+    if (groupSplit) {
+        SPLIT_THREADS(gStart, gEnd, nGroups, nThreads, threadIndex);
+        h0Begin = gStart * kvMul;
+        h0Limit = gEnd * kvMul;
+        headStride = kvMul;              // kvMul 개씩 묶어서 순회
+    } else {
+        SPLIT_THREADS(hStart, hEnd, nHeads0, nThreads, threadIndex);
+        h0Begin = hStart;
+        h0Limit = hEnd;
+        headStride = 1u;
+    }
+
+    // 이 배치에서 참조해야 하는 가장 먼 위치
+    NnUint maxPos = 0u;
+    for (NnUint b = 0; b < batchSize; b++) {
+        const NnUint p = (NnUint)positions[b];
+        if (p > maxPos)
+            maxPos = p;
+    }
+
+    for (NnUint h0Base = h0Begin; h0Base < h0Limit; h0Base += headStride) {
+        const NnUint nHeadsInGroup = (h0Base + headStride <= h0Limit)
+            ? headStride
+            : (h0Limit - h0Base);
+        const NnUint headIndex = h0Base / kvMul;
+        const float *hKc = &keyCache[headIndex * headDim];
+        const float *hVc = &valueCache[headIndex * headDim];
+
+        // (1) score: t 를 바깥 루프로 두어 posK 를 한 번만 읽는다.
+        for (NnUint t = 0; t <= maxPos; t++) {
+            const float *posK = &hKc[t * kvDim0];
+            for (NnUint j = 0; j < nHeadsInGroup; j++) {
+                const NnUint h0 = h0Base + j;
+                for (NnUint b = 0; b < batchSize; b++) {
+                    if (t > (NnUint)positions[b])
+                        continue;             // causal mask
+                    const float *hQ = &query[b * qSliceD0 + h0 * headDim];
+                    att[(b * nHeads0 + h0) * seqLen + t] =
+                        dotProduct_F32(hQ, posK, headDim) / headDimRoot;
+                }
+            }
+        }
+
+        // (2) softmax: (batch, head) 별로 자기 위치까지
+        for (NnUint j = 0; j < nHeadsInGroup; j++) {
+            const NnUint h0 = h0Base + j;
+            for (NnUint b = 0; b < batchSize; b++)
+                softmax_F32(&att[(b * nHeads0 + h0) * seqLen], (NnUint)positions[b] + 1u);
+        }
+
+        // (3) 출력 누적 전 0으로 초기화
+        for (NnUint j = 0; j < nHeadsInGroup; j++) {
+            const NnUint h0 = h0Base + j;
+            for (NnUint b = 0; b < batchSize; b++)
+                std::memset(&((float *)outputs[b])[h0 * headDim], 0, headDim * sizeof(float));
+        }
+
+        // (4) attention x V: 여기서도 t 를 바깥으로 두어 posV 를 한 번만 읽는다.
+        for (NnUint t = 0; t <= maxPos; t++) {
+            const float *posV = &hVc[t * kvDim0];
+            for (NnUint j = 0; j < nHeadsInGroup; j++) {
+                const NnUint h0 = h0Base + j;
+                for (NnUint b = 0; b < batchSize; b++) {
+                    if (t > (NnUint)positions[b])
+                        continue;
+                    const float posA = att[(b * nHeads0 + h0) * seqLen + t];
+                    float *hY = &((float *)outputs[b])[h0 * headDim];
+#if defined(__ARM_NEON)
+                    const float32x4_t va = vdupq_n_f32(posA);
+                    NnUint i = 0;
+                    for (; i + 4 <= headDim; i += 4)
+                        vst1q_f32(&hY[i], vmlaq_f32(vld1q_f32(&hY[i]), va, vld1q_f32(&posV[i])));
+                    for (; i < headDim; i++)
+                        hY[i] += posA * posV[i];
+#else
+                    for (NnUint i = 0; i < headDim; i++)
+                        hY[i] += posA * posV[i];
+#endif
+                }
+            }
+        }
+    }
+}
+
 static void mul_F32(float *y, const float *x, const float *m, const NnUint n, const NnUint nThreads, const NnUint threadIndex) {
     SPLIT_THREADS(start, end, n, nThreads, threadIndex);
     unsigned int i = start;
@@ -1414,6 +1527,24 @@ static void multiHeadAttForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnU
     float *valueCache = (float *)context->buffers[config->valueCacheBufferIndex];
     float *att = (float *)context->buffers[config->attBufferIndex];
     const float *positions = (float *)context->pipes[config->positionPipeIndex];
+
+    // prefill(batchSize > 1)은 KV 캐시를 배치 전체가 공유하는 배치 커널로 처리한다.
+    // decode(batchSize == 1)는 재사용할 대상이 없으므로 기존 경로가 그대로 최적이다.
+    if (batchSize > 1u) {
+#ifndef NDEBUG
+        for (NnUint b = 0; b < batchSize; b++)
+            assert((NnUint)positions[b] < config->seqLen);
+#endif
+        multiheadAttBatch_F32(
+            context->output, query, config->qSliceD0,
+            att, keyCache, valueCache,
+            positions, batchSize,
+            config->nHeads, config->nHeads0,
+            config->nKvHeads, config->kvDim0, config->headDim,
+            config->seqLen,
+            nThreads, threadIndex);
+        return;
+    }
 
     for (NnUint batchIndex = 0; batchIndex < batchSize; batchIndex++) {
         float *y = (float *)context->output[batchIndex];

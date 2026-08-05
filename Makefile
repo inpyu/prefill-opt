@@ -2,7 +2,17 @@ CXX = g++
 CXXFLAGS = -std=c++11 -Werror -Wformat -Werror=format-security 
 
 ifndef TERMUX_VERSION
-	CXXFLAGS += -march=native -mtune=native
+	# aarch64에서는 -mtune=native 를 함께 주면 -march=native 가 확장한 CPU 기능셋이
+	# 기본 armv8-a 로 되돌아가 __ARM_FEATURE_DOTPROD 가 사라진다.
+	# 그러면 llamafile_sgemm 의 Q40xQ80 배치 경로가 통째로 비활성화되고
+	# prefill 이 토큰별 matvec 폴백으로 떨어진다(배치 이득 0).
+	# aarch64 에서는 arch+tune 을 동시에 세팅하는 -mcpu=native 를 쓴다.
+	UNAME_M := $(shell uname -m)
+	ifneq (,$(filter aarch64 arm64,$(UNAME_M)))
+		CXXFLAGS += -mcpu=native
+	else
+		CXXFLAGS += -march=native -mtune=native
+	endif
 endif
 
 # Performance-first default:
