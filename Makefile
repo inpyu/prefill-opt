@@ -66,21 +66,23 @@ nn-network.o: src/nn/nn-network.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
 llamafile-sgemm.o: src/nn/llamafile/sgemm.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
+nn-repack.o: src/nn/nn-repack.cpp
+	$(CXX) $(CXXFLAGS) -c $^ -o $@
 nn-cpu-ops.o: src/nn/nn-cpu-ops.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
 nn-cpu.o: src/nn/nn-cpu.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
 nn-pipeline.o: src/nn/nn-pipeline.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
-nn-cpu-test: src/nn/nn-cpu-test.cpp nn-quants.o nn-core.o nn-executor.o llamafile-sgemm.o nn-cpu-ops.o nn-cpu.o
+nn-cpu-test: src/nn/nn-cpu-test.cpp nn-quants.o nn-core.o nn-executor.o llamafile-sgemm.o nn-repack.o nn-cpu-ops.o nn-cpu.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
-nn-cpu-ops-test: src/nn/nn-cpu-ops-test.cpp nn-quants.o nn-core.o nn-executor.o llamafile-sgemm.o nn-cpu.o
+nn-cpu-ops-test: src/nn/nn-cpu-ops-test.cpp nn-quants.o nn-core.o nn-executor.o llamafile-sgemm.o nn-repack.o nn-cpu.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 nn-pipeline-test: src/nn/nn-pipeline-test.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o nn-pipeline.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 nn-topology-test: src/nn/nn-topology-test.cpp nn-quants.o nn-core.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
-test-pp2-graph: test-pp2-graph.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o llamafile-sgemm.o nn-cpu-ops.o nn-cpu.o llm.o
+test-pp2-graph: test-pp2-graph.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o llamafile-sgemm.o nn-repack.o nn-cpu-ops.o nn-cpu.o llm.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 nn-vulkan.o: src/nn/nn-vulkan.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
@@ -103,13 +105,13 @@ llm.o: src/llm.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
 app.o: src/app.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
-tokenizer-test: src/tokenizer-test.cpp nn-quants.o nn-core.o llamafile-sgemm.o nn-cpu-ops.o tokenizer.o
+tokenizer-test: src/tokenizer-test.cpp nn-quants.o nn-core.o llamafile-sgemm.o nn-repack.o nn-cpu-ops.o tokenizer.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
-dllama: src/dllama.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o nn-pipeline.o llamafile-sgemm.o nn-cpu-ops.o nn-cpu.o tokenizer.o llm.o app.o ${DEPS}
+dllama: src/dllama.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o nn-pipeline.o llamafile-sgemm.o nn-repack.o nn-cpu-ops.o nn-cpu.o tokenizer.o llm.o app.o ${DEPS}
 	$(CXX) $(CXXFLAGS) $(filter-out %.spv, $^) -o $@ $(LIBS)
-dllama-api: src/dllama-api.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o nn-pipeline.o llamafile-sgemm.o nn-cpu-ops.o nn-cpu.o tokenizer.o llm.o app.o ${DEPS}
+dllama-api: src/dllama-api.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o nn-pipeline.o llamafile-sgemm.o nn-repack.o nn-cpu-ops.o nn-cpu.o tokenizer.o llm.o app.o ${DEPS}
 	$(CXX) $(CXXFLAGS) $(filter-out %.spv, $^) -o $@ $(LIBS)
-dllama-gateway: src/dllama-gateway.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o nn-pipeline.o llamafile-sgemm.o nn-cpu-ops.o nn-cpu.o tokenizer.o llm.o app.o ${DEPS}
+dllama-gateway: src/dllama-gateway.cpp nn-quants.o nn-core.o nn-executor.o nn-network.o nn-pipeline.o llamafile-sgemm.o nn-repack.o nn-cpu-ops.o nn-cpu.o tokenizer.o llm.o app.o ${DEPS}
 	$(CXX) $(CXXFLAGS) $(filter-out %.spv, $^) -o $@ $(LIBS)
 
 # Baseline build from the pre-refactor commit for performance comparison.
@@ -126,4 +128,4 @@ dllama_1:
 # even if DEBUG is exported in the shell environment).
 dllama-fast:
 	$(MAKE) clean
-	$(MAKE) dllama DEBUG= CXXFLAGS='-std=c++11 -Werror -Wformat -Werror=format-security -march=native -mtune=native -O3'
+	$(MAKE) dllama DEBUG= CXXFLAGS='-std=c++11 -Werror -Wformat -Werror=format-security -O3'

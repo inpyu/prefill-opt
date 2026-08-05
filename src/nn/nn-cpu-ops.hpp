@@ -29,7 +29,22 @@ typedef struct {
 
     NnByte *weight;
     NnSize3D weightSize;
+
+    // Q4_0 repack 경로 (research/02, research/03).
+    // 가중치는 로드가 끝난 시점에 in-place 로 재배치되므로 추가 메모리는 없다.
+    // loadedBytes 로 "이 op 의 가중치가 전부 들어왔는가"를 판단한다.
+    NnSize loadedBytes;
+    bool isRepacked;
+
+    // prefill 에서는 로짓이 전혀 소비되지 않는다(prefill 은 위치 0..n-2 만 처리하고,
+    // decode 첫 스텝이 마지막 입력 토큰을 처리해 첫 출력 로짓을 만든다).
+    // 따라서 lm_head 는 prefill 동안 마지막 행만 계산하면 된다.
+    bool isLmHead;
 } NnCpuOpContext;
+
+// prefill/decode 단계를 op 계층에 알린다. NnExecutor::setDecodePhase 에서 호출된다.
+void nnCpuOpsSetDecodePhase(bool isDecodePhase);
+bool nnCpuOpsIsDecodePhase();
 
 typedef void (*NnCpuOpForwardInit)(NnCpuOpContext *context);
 typedef void (*NnCpuOpForward)(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context);

@@ -1,4 +1,5 @@
 #include "nn-cpu.hpp"
+#include "nn-repack.hpp"
 #include "nn-cpu-ops.hpp"
 #include <cassert>
 #include <cstring>
@@ -122,6 +123,11 @@ NnDeviceSegment *NnCpuDevice::createSegment(NnUint segmentIndex) {
         opContext->buffers = buffers;
         opContext->bufferConfigs = nodeConfig->buffers;
         opContext->bufferFlags = bufferFlags;
+        // Q4_0 repack 상태 초기화. 실제 repack 은 가중치 로드가 끝난 뒤 수행된다.
+        opContext->loadedBytes = 0;
+        opContext->isRepacked = false;
+        opContext->isLmHead = opConfig->name != nullptr &&
+            std::strcmp(opConfig->name, "final_matmul_logits") == 0;
 
         opContext->input = new NnByte *[inputsPtr[opIndex].size()];
         opContext->inputSize = inputSizes[opIndex];
@@ -223,6 +229,25 @@ void NnCpuDeviceSegment::loadWeight(NnUint opIndex, NnSize offset, NnSize nBytes
     context->weight = weight;
 #else
     std::memcpy(&context->weight[offset], weight, nBytes);
+
+    // Q4_0 repack (research/03 §8).
+    // 로드는 슬라이스 단위로 여러 번 들어오므로, 이 op 의 가중치가 전부 채워진
+    // 시점에만 한 번 재배치한다. root/worker 가 모두 이 경로를 지나므로
+    // 별도의 "로드 완료" 훅을 두 곳에 만들 필요가 없다.
+    context->loadedBytes += nBytes;
+    if (!context->isRepacked &&
+        context->loadedBytes >= context->weightSize.nBytes &&
+        context->weightSize.floatType == F_Q40 &&
+        context->weightSize.y > 0u)
+    {
+        const NnUint d = context->weightSize.x;              // 출력 행 수
+        const NnUint kBlocks = context->weightSize.y / Q40_BLOCK_SIZE;
+        if (nnRepackSupported(d, kBlocks) &&
+            nnRepackQ40InPlace(context->weight, d, kBlocks))
+        {
+            context->isRepacked = true;
+        }
+    }
 #endif
 }
 

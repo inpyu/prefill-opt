@@ -14,6 +14,8 @@
     #include <immintrin.h>
 #endif
 #include "nn-cpu-ops.hpp"
+#include "nn-repack.hpp"
+#include <atomic>
 #include "nn-quants.hpp"
 #include "llamafile/sgemm.hpp"
 
@@ -1270,17 +1272,49 @@ static void initMatmulArgmaxForward(NnCpuOpContext *context) {
         printf("🚧 Op %s does not have contiguous memory for output\n", context->name);
 }
 
+// prefill/decode 단계. NnExecutor::setDecodePhase 에서 갱신된다.
+// 단일 추론 프로세스 기준의 전역 상태이며, 실행기 스레드들은 op 경계에서만
+// 동기화되므로 forward 중에는 값이 바뀌지 않는다.
+static std::atomic<bool> gDecodePhase{true};
+
+void nnCpuOpsSetDecodePhase(bool isDecodePhase) {
+    gDecodePhase.store(isDecodePhase, std::memory_order_relaxed);
+}
+
+bool nnCpuOpsIsDecodePhase() {
+    return gDecodePhase.load(std::memory_order_relaxed);
+}
+
+// prefill 에서 lm_head 가 실제로 계산해야 하는 행 범위.
+// prefill 은 위치 0..n-2 만 처리하고 로짓을 전혀 읽지 않는다(decode 첫 스텝이
+// 마지막 입력 토큰을 처리해 첫 출력 로짓을 만든다). 따라서 나머지 행의 계산은
+// 순수한 낭비다. 그래프 형태와 sync 는 건드리지 않아 다중 노드 정합성을 유지하고,
+// 연산만 줄인다.
+static inline void lmHeadRowRange(const NnCpuOpContext *context, NnUint batchSize,
+                                  NnUint *rowBegin, NnUint *rowCount) {
+    if (context->isLmHead && batchSize > 1u && !nnCpuOpsIsDecodePhase()) {
+        *rowBegin = batchSize - 1u;
+        *rowCount = 1u;
+    } else {
+        *rowBegin = 0u;
+        *rowCount = batchSize;
+    }
+}
+
 static bool matmulForward_llamafile(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
     if (!context->hasInputContinuousMemory || !context->hasOutputContinuousMemory || context->inputSize.z != 1u)
         return false;
 
     const NnUint n = context->weightSize.y / getBlockSize(context->inputSize.floatType);
     const NnUint d = context->weightSize.x;
+    NnUint rowBegin, rowCount;
+    lmHeadRowRange(context, batchSize, &rowBegin, &rowCount);
+    const NnSize inRowBytes = getBytes(context->inputSize.floatType, context->weightSize.y);
     return llamafile_sgemm(
-        d, batchSize, n,
+        d, rowCount, n,
         context->weight, n,
-        context->input[0], n,
-        context->output[0], d,
+        context->input[0] + (std::size_t)rowBegin * inRowBytes, n,
+        context->output[0] + (std::size_t)rowBegin * d * sizeof(float), d,
         threadIndex, nThreads, 0,
         context->weightSize.floatType,
         context->inputSize.floatType,
@@ -1316,7 +1350,79 @@ static void matmulForward_F32_F32_F32(NnUint nThreads, NnUint threadIndex, NnUin
     }
 }
 
+// Q4_0 repack 경로 (research/03 §8).
+// 가중치는 로드 시점에 block_q4_0x4 로 재배치돼 있다.
+//   - 배치 4의 배수 부분: 활성화를 block_q8_0x4 로 옮겨 gemm
+//   - 나머지 행(및 decode batch=1): 평범한 Q80 을 그대로 gemv
+// 실측 3.0~3.2x (Cortex-A76 4스레드, batch 32).
+static bool matmulForward_repack(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+#if NN_REPACK_AVAILABLE
+    if (!context->isRepacked ||
+        !context->hasInputContinuousMemory ||
+        !context->hasOutputContinuousMemory ||
+        context->inputSize.z != 1u)
+        return false;
+
+    const NnUint d = context->weightSize.x;
+    const NnUint kElems = context->weightSize.y;
+    const NnUint kBlocks = kElems / Q40_BLOCK_SIZE;
+    const NnByte *w = context->weight;
+
+    // 출력 열을 스레드로 나눈다. 경계는 4의 배수로 맞춘다(커널 제약).
+    const NnUint nCols4 = d / 4u;
+    const NnUint per4 = (nCols4 + nThreads - 1u) / nThreads;
+    const NnUint c0 = threadIndex * per4 * 4u;
+    if (c0 >= d)
+        return true;
+    NnUint cN = per4 * 4u;
+    if (c0 + cN > d)
+        cN = d - c0;
+
+    NnUint rowBegin, rowCount;
+    lmHeadRowRange(context, batchSize, &rowBegin, &rowCount);
+    const NnBlockQ80 *x80 = (const NnBlockQ80 *)context->input[0] + (std::size_t)rowBegin * kBlocks;
+    float *out = (float *)context->output[0] + (std::size_t)rowBegin * d;
+    const block_q4_0x4 *wCol = (const block_q4_0x4 *)&w[(std::size_t)(c0 / 4u) * kBlocks * sizeof(block_q4_0x4)];
+
+    const NnUint nGemm = rowCount & ~3u;   // 4의 배수 부분
+
+    if (nGemm > 0u) {
+        // 활성화를 block_q8_0x4 로 옮긴다.
+        //
+        // 스레드는 출력 "열"로 나뉘므로 모든 스레드가 배치 전체의 활성화를 필요로 한다.
+        // 실행기는 op 경계에서만 동기화하고 op 내부 배리어가 없으므로,
+        // 각 스레드가 자기 스크래치에 전체를 중복 변환한다.
+        //
+        // 중복 비용은 무시할 수준이다. batch 32 / k 4096 기준 스레드당 ~139 kB 셔플인데,
+        // 같은 op 의 가중치 읽기는 수십 MB 다. 반대로 "행"으로 나누면 배리어는 없어지지만
+        // 모든 스레드가 가중치 전체를 읽어 가중치 트래픽이 nThreads 배가 된다.
+        thread_local std::vector<NnByte> scratch;
+        const std::size_t need = (std::size_t)(nGemm / 4u) * kBlocks * sizeof(block_q8_0x4);
+        if (scratch.size() < need)
+            scratch.resize(need);
+        block_q8_0x4 *xr = (block_q8_0x4 *)scratch.data();
+
+        for (NnUint g = 0; g < nGemm / 4u; g++)
+            nnPackQ80To4x4(&x80[(std::size_t)g * 4u * kBlocks], &xr[(std::size_t)g * kBlocks], kBlocks);
+
+        ggml_gemm_q4_0_4x4_q8_0((int)kElems, &out[c0], d, wCol, xr, (int)nGemm, (int)cN);
+    }
+
+    // 나머지 행: gemv (활성화는 Q80 그대로)
+    for (NnUint b = nGemm; b < rowCount; b++) {
+        ggml_gemv_q4_0_4x4_q8_0((int)kElems, &out[(std::size_t)b * d + c0], d,
+            wCol, &x80[(std::size_t)b * kBlocks], 1, (int)cN);
+    }
+    return true;
+#else
+    (void)nThreads; (void)threadIndex; (void)batchSize; (void)context;
+    return false;
+#endif
+}
+
 static void matmulForward_Q80_Q40_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+    if (matmulForward_repack(nThreads, threadIndex, batchSize, context))
+        return;
     if (matmulForward_llamafile(nThreads, threadIndex, batchSize, context))
         return;
 

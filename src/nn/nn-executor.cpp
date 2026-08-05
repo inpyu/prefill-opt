@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include "nn-executor.hpp"
+#include "nn-cpu-ops.hpp"
 
 static inline void executeStep(NnExecutorStep *step, NnUint nThreads, NnExecutorThread *thread, NnExecutorContext *context);
 
@@ -391,6 +392,7 @@ void NnExecutor::forward() {
 
 void NnExecutor::setDecodePhase(bool isDecodePhase) {
     context.synchronizer->setDecodePhase(isDecodePhase);
+    nnCpuOpsSetDecodePhase(isDecodePhase);
 }
 
 NnUint NnExecutor::getTotalTime(NnExecutorStepType type) {
