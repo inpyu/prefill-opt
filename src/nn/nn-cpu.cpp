@@ -129,6 +129,7 @@ NnDeviceSegment *NnCpuDevice::createSegment(NnUint segmentIndex) {
         opContext->isRepacked = false;
         opContext->isLmHead = opConfig->name != nullptr &&
             std::strcmp(opConfig->name, "final_matmul_logits") == 0;
+        opContext->layerIndex = opConfig->index;
 
         opContext->input = new NnByte *[inputsPtr[opIndex].size()];
         opContext->inputSize = inputSizes[opIndex];

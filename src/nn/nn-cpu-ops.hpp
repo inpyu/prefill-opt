@@ -40,6 +40,10 @@ typedef struct {
     // decode 첫 스텝이 마지막 입력 토큰을 처리해 첫 출력 로짓을 만든다).
     // 따라서 lm_head 는 prefill 동안 마지막 행만 계산하면 된다.
     bool isLmHead;
+
+    // 캘리브레이션 덤프용 (research/07 깊이 분해 검증).
+    // opConfig->index 는 레이어 번호다.
+    NnUint layerIndex;
 } NnCpuOpContext;
 
 // prefill/decode 단계를 op 계층에 알린다. NnExecutor::setDecodePhase 에서 호출된다.

@@ -1420,11 +1420,81 @@ static bool matmulForward_repack(NnUint nThreads, NnUint threadIndex, NnUint bat
 #endif
 }
 
+// ---- 캘리브레이션 덤프 (research/07 깊이 분해 검증) ----
+//
+// DLLAMA_CALIB_DIR 이 설정되면 block_matmul_k / block_matmul_v 실행 직후
+// 입력 phi(x_l) 과 출력 K_l, V_l (RoPE 이전) 을 파일로 append 한다.
+//
+// RoPE 이전 값을 쓰는 이유: RoPE 는 위치 의존이므로, 위치와 무관한 선형 사상
+//   K_l = A_l phi(x_k)
+// 을 적합하려면 사영 직후 값이어야 한다. RoPE 는 그 뒤에 평소대로 적용된다.
+//
+// 형식: float32 raw. 각 파일은 [토큰 x 차원] 이 순서대로 이어붙는다.
+static const char *calibDir() {
+    static const char *d = std::getenv("DLLAMA_CALIB_DIR");
+    return d;
+}
+
+static void calibDump(const char *kind, NnUint layer, const float *data, NnUint nRows, NnUint nCols) {
+    const char *dir = calibDir();
+    if (dir == nullptr)
+        return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s_l%02u.f32", dir, kind, layer);
+    FILE *f = fopen(path, "ab");
+    if (f == nullptr)
+        return;
+    fwrite(data, sizeof(float), (std::size_t)nRows * nCols, f);
+    fclose(f);
+}
+
+// 이 op 가 캘리브레이션 대상인가 (block_matmul_k / block_matmul_v)
+static inline const char *calibKindOf(const NnCpuOpContext *context) {
+    if (calibDir() == nullptr || context->name == nullptr)
+        return nullptr;
+    if (std::strcmp(context->name, "block_matmul_k") == 0) return "k";
+    if (std::strcmp(context->name, "block_matmul_v") == 0) return "v";
+    return nullptr;
+}
+
+// 사영 직후 출력을 덤프한다. 스레드 0 만 수행하며, 실행기가 op 경계에서
+// 동기화하므로 이 시점에는 모든 스레드의 기여가 반영돼 있다.
+static void calibDumpAfterMatmul(NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+    if (threadIndex != 0)
+        return;
+    const char *kind = calibKindOf(context);
+    if (kind == nullptr)
+        return;
+    const NnUint dOut = context->weightSize.x;
+    calibDump(kind, context->layerIndex, (const float *)context->output[0], batchSize, dOut);
+    // K 쪽에서만 입력을 함께 남긴다(K 와 V 의 입력은 같은 yq 버퍼다).
+    // 입력은 Q80 이므로 역양자화해서 F32 로 기록한다.
+    if (std::strcmp(kind, "k") == 0) {
+        const NnUint kElems = context->weightSize.y;
+        const NnUint nBlocks = kElems / Q80_BLOCK_SIZE;
+        std::vector<float> tmp((std::size_t)batchSize * kElems);
+        const NnBlockQ80 *x = (const NnBlockQ80 *)context->input[0];
+        for (NnUint b = 0; b < batchSize; b++) {
+            for (NnUint bi = 0; bi < nBlocks; bi++) {
+                const NnBlockQ80 *blk = &x[(std::size_t)b * nBlocks + bi];
+                const float d = CONVERT_F16_TO_F32(blk->d);
+                for (NnUint j = 0; j < Q80_BLOCK_SIZE; j++)
+                    tmp[(std::size_t)b * kElems + bi * Q80_BLOCK_SIZE + j] = d * blk->qs[j];
+            }
+        }
+        calibDump("x", context->layerIndex, tmp.data(), batchSize, kElems);
+    }
+}
+
 static void matmulForward_Q80_Q40_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
-    if (matmulForward_repack(nThreads, threadIndex, batchSize, context))
+    if (matmulForward_repack(nThreads, threadIndex, batchSize, context)) {
+        calibDumpAfterMatmul(threadIndex, batchSize, context);
         return;
-    if (matmulForward_llamafile(nThreads, threadIndex, batchSize, context))
+    }
+    if (matmulForward_llamafile(nThreads, threadIndex, batchSize, context)) {
+        calibDumpAfterMatmul(threadIndex, batchSize, context);
         return;
+    }
 
     const NnMatmulOpConfig *config = (NnMatmulOpConfig *)context->opConfig;
     const NnUint nActiveExpertsOr1 = std::max(config->nActiveExperts, 1u);
