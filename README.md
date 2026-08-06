@@ -23,8 +23,11 @@ SBC(Raspberry Pi 급) 커머디티 클러스터에서 **prefill / TTFT** 를 최
 
 ### research/ 읽는 순서
 
+**[research/README.md](research/README.md) 부터 읽을 것** — 목표·문제·해결·선행연구를 한 문서에 정리했다.
+
 | 문서 | 내용 |
 |---|---|
+| [README.md](research/README.md) | **프로젝트 개요 (여기부터)** |
 | [00-RESEARCH-PLAN.md](research/00-RESEARCH-PLAN.md) | 문제 정의, 가설 H1~H5, 기여 구조, 타겟 학회 |
 | [01-EXP1-cost-breakdown.md](research/01-EXP1-cost-breakdown.md) | prefill 비용 분해 실험 프로토콜 |
 | [02-baseline-dotprod-fix.md](research/02-baseline-dotprod-fix.md) | 발견 #1 — `-mtune=native` 가 dotprod 를 무력화 |
