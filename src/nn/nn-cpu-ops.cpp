@@ -16,6 +16,7 @@
 #include "nn-cpu-ops.hpp"
 #include "nn-repack.hpp"
 #include <atomic>
+#include <thread>
 #include "nn-quants.hpp"
 #include "llamafile/sgemm.hpp"
 
@@ -1457,14 +1458,30 @@ static inline const char *calibKindOf(const NnCpuOpContext *context) {
     return nullptr;
 }
 
-// 사영 직후 출력을 덤프한다. 스레드 0 만 수행하며, 실행기가 op 경계에서
-// 동기화하므로 이 시점에는 모든 스레드의 기여가 반영돼 있다.
-static void calibDumpAfterMatmul(NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
-    if (threadIndex != 0)
-        return;
+// 사영 직후 출력을 덤프한다.
+//
+// 주의: 출력 버퍼는 스레드들이 각자 다른 열 구간에 쓴다. 실행기는 op "경계"에서만
+// 동기화하므로, op 안에서 스레드 0 이 바로 읽으면 다른 스레드가 아직 쓰는 중인
+// 부분을 읽게 된다(실제로 이 버그 때문에 레이어 16 의 재구성 오차가 0 이 아니라
+// 0.37 로 나왔다 — K_16 = W_k^16 phi(x_16) 이므로 정의상 0 이어야 한다).
+// 캘리브레이션은 진단 전용이므로 여기서만 스핀 배리어를 쓴다.
+static void calibDumpAfterMatmul(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
     const char *kind = calibKindOf(context);
     if (kind == nullptr)
         return;
+
+    // op 별 도착 카운터. 모든 스레드가 도달해야 버퍼가 완성된다.
+    static std::atomic<unsigned> arrived{0};
+    static std::atomic<unsigned> epoch{0};
+    const unsigned myEpoch = epoch.load(std::memory_order_acquire);
+    const unsigned n = arrived.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (n < nThreads) {
+        while (epoch.load(std::memory_order_acquire) == myEpoch)
+            std::this_thread::yield();
+        return;
+    }
+    // 마지막 도착 스레드가 덤프하고 다음 라운드를 연다.
+    arrived.store(0, std::memory_order_relaxed);
     const NnUint dOut = context->weightSize.x;
     calibDump(kind, context->layerIndex, (const float *)context->output[0], batchSize, dOut);
     // K 쪽에서만 입력을 함께 남긴다(K 와 V 의 입력은 같은 yq 버퍼다).
@@ -1484,15 +1501,16 @@ static void calibDumpAfterMatmul(NnUint threadIndex, NnUint batchSize, NnCpuOpCo
         }
         calibDump("x", context->layerIndex, tmp.data(), batchSize, kElems);
     }
+    epoch.fetch_add(1, std::memory_order_release);
 }
 
 static void matmulForward_Q80_Q40_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
     if (matmulForward_repack(nThreads, threadIndex, batchSize, context)) {
-        calibDumpAfterMatmul(threadIndex, batchSize, context);
+        calibDumpAfterMatmul(nThreads, threadIndex, batchSize, context);
         return;
     }
     if (matmulForward_llamafile(nThreads, threadIndex, batchSize, context)) {
-        calibDumpAfterMatmul(threadIndex, batchSize, context);
+        calibDumpAfterMatmul(nThreads, threadIndex, batchSize, context);
         return;
     }
 

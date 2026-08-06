@@ -19,14 +19,20 @@ import numpy as np
 
 
 def load(path, cols):
+    # float64 로 올린다. float32 로 4096x4096 정규방정식을 풀면 오차가 누적된다.
     a = np.fromfile(path, dtype=np.float32)
     if a.size % cols != 0:
         a = a[: (a.size // cols) * cols]
-    return a.reshape(-1, cols)
+    return a.reshape(-1, cols).astype(np.float64)
 
 
-def ls_fit(X, Y, ridge=1e-3):
-    """min_A ||X A - Y||_F  (X: n x h, Y: n x d)  ->  A: h x d"""
+def ls_fit(X, Y, ridge=1e-4):
+    """min_A ||X A - Y||_F  (X: n x h, Y: n x d)  ->  A: h x d
+
+    관측 행이 미지수(h)보다 적으면 미결정 시스템이라 유일해가 없다.
+    lstsq 는 최소 노름 해를 주는데 그건 진짜 W 와 달라서 홀드아웃 오차가 남는다.
+    -> 행 수가 h 의 3배 이상인지 확인할 것.
+    """
     h = X.shape[1]
     XtX = X.T @ X
     XtX[np.diag_indices(h)] += ridge * np.trace(XtX) / h
@@ -61,6 +67,23 @@ def main():
     if Xtr.shape[0] < args.hidden:
         print(f"  ⚠️  train 행({Xtr.shape[0]})이 hidden({args.hidden})보다 작습니다 — "
               f"ridge 로 정칙화되지만 프롬프트를 더 모으는 편이 좋습니다.")
+
+    # ---- 0) 온전성 검사: l = k 에서는 오차가 0 에 가까워야 한다 ----
+    # K_k = W_k^k phi(x_k) 이므로 같은 선형 사상을 복원하는 것이다.
+    # 여기서 0 이 아니면 덤프가 잘못됐거나 행이 부족한 것이고,
+    # 그 상태의 상위 레이어 수치는 판정에 쓸 수 없다.
+    kp0 = d / f"k_l{args.k:02d}.f32"
+    if kp0.exists():
+        K0 = load(kp0, args.kvdim)
+        m0 = min(len(X), len(K0))
+        A0 = ls_fit(X[:m0][:-nTest], K0[:m0][:-nTest])
+        e0 = rel_err(K0[:m0][-nTest:], X[:m0][-nTest:] @ A0)
+        verdict = "OK" if e0 < 0.02 else ("행 부족 의심" if Xtr.shape[0] < 3 * args.hidden else "*** 덤프 이상 ***")
+        print(f"\n[온전성] layer {args.k} 자기적합 rel.err = {e0:.5f}  ({verdict})")
+        print(f"          학습행 {Xtr.shape[0]} / 미지수 {args.hidden} "
+              f"= {Xtr.shape[0]/args.hidden:.1f}x  (3x 이상 권장)")
+        if e0 >= 0.02:
+            print("          ⚠️  이 값이 0.02 이상이면 아래 수치는 판정 근거로 쓸 수 없다.")
 
     # ---- 1) 레이어별 dense 적합 ----
     print(f"\n{'layer':>5} {'K rel.err':>10} {'V rel.err':>10}")
