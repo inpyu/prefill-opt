@@ -12,6 +12,9 @@ typedef SSIZE_T ssize_t;
 #endif
 #include "nn-network.hpp"
 #include <cassert>
+#ifndef _WIN32
+#include <poll.h>
+#endif
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -89,8 +92,38 @@ static inline NnSize getNetIoChunkSize() {
     return value;
 }
 
-static inline void sleepOnSocketRetry() {
+// 논블로킹 소켓이 EAGAIN 을 반환했을 때의 대기.
+//
+// 원래는 무조건 1ms 를 잤다. 리눅스 타이머 해상도상 실제로는 1~2ms 이고,
+// 하나의 집합통신에서 재시도가 수십 회 발생하므로 배리어 1회가 수십 ms 로 부풀었다.
+// 실측(TP 2노드, S=447): 배리어 896회에 syncWait 39.3초 = 배리어당 43.9ms.
+// 그중 회선 시간은 6.9ms 뿐이고 나머지 37ms 가 이 sleep 이었다.
+//
+// poll() 은 데이터가 준비되면 즉시 깨어나므로(마이크로초 단위) sleep 해상도에
+// 묶이지 않는다. 동시에 스핀이 아니라 커널 대기라 CPU 코어를 뺏지 않는다 —
+// 코어가 4개뿐인 SBC 에서는 이 점이 중요하다.
+static inline void waitOnSocketRetry(int socket, bool forWrite) {
+#ifndef _WIN32
+    struct pollfd pfd;
+    pfd.fd = socket;
+    pfd.events = forWrite ? POLLOUT : POLLIN;
+    pfd.revents = 0;
+    // 타임아웃은 상위 루프의 stall 감지가 동작하도록 짧게 유지한다.
+    poll(&pfd, 1, 1);
+#else
+    (void)socket; (void)forWrite;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
+}
+
+// 소켓을 특정할 수 없는 호출부(readMany/writeMany 는 여러 소켓을 동시에 본다)를 위한 폴백.
+static inline void sleepOnSocketRetry() {
+#ifndef _WIN32
+    // 1ms 통째 sleep 대신 즉시 양보. 상위 루프가 곧바로 재시도한다.
+    std::this_thread::yield();
+#else
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
 }
 
 static inline bool isEagainError() {
@@ -158,7 +191,24 @@ void setReuseAddr(int socket) {
     #endif
 }
 
+// EXP-1: sync 시간을 wait(peer 대기)과 xfer(실제 바이트 이동)로 나눈다.
+//
+// 두 계열의 전송 경로가 있고 둘 다 덮어야 한다:
+//   - 집합통신(TP): NnNetwork::readMany/writeMany 가 recv/send 를 직접 호출
+//   - 파이프라인(PP): NnNetwork::read/write -> readSocket/writeSocket (자유 함수)
+// 후자는 인스턴스에 접근할 수 없으므로 파일 스코프 원자 카운터를 공유한다.
+// (추론 프로세스당 NnNetwork 는 사실상 하나다)
+static std::atomic<unsigned long long> gSyncWaitUs{0};
+static std::atomic<unsigned long long> gSyncXferUs{0};
+
+static inline unsigned long long nowUsNet() {
+    return (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void writeSocket(int socket, const void *data, NnSize size) {
+    const unsigned long long tEnter = nowUsNet();
+    unsigned long long waitUs = 0ull;
     auto lastProgressTime = std::chrono::steady_clock::now();
     auto lastLogTime = lastProgressTime;
     const unsigned long logTimeoutMs = getNetStallLogMs();
@@ -191,7 +241,11 @@ void writeSocket(int socket, const void *data, NnSize size) {
                     fflush(stdout);
                     lastLogTime = now;
                 }
-                sleepOnSocketRetry();
+                {
+                    const unsigned long long tSleep0 = nowUsNet();
+                    waitOnSocketRetry(socket, true);
+                    waitUs += nowUsNet() - tSleep0;
+                }
                 continue;
             }
             const int err = SOCKET_LAST_ERRCODE;
@@ -207,10 +261,17 @@ void writeSocket(int socket, const void *data, NnSize size) {
         data = (const char*)data + s;
         lastProgressTime = std::chrono::steady_clock::now();
     }
+    {
+        const unsigned long long total = nowUsNet() - tEnter;
+        gSyncWaitUs.fetch_add(waitUs, std::memory_order_relaxed);
+        gSyncXferUs.fetch_add(total > waitUs ? total - waitUs : 0ull, std::memory_order_relaxed);
+    }
 }
 
 static inline bool tryReadSocket(int socket, void *data, NnSize size, unsigned long maxAttempts) {
     // maxAttempts = 0 means infinite attempts
+    const unsigned long long tEnter = nowUsNet();
+    unsigned long long waitUs = 0ull;
     auto lastProgressTime = std::chrono::steady_clock::now();
     auto lastLogTime = lastProgressTime;
     const unsigned long logTimeoutMs = getNetStallLogMs();
@@ -251,7 +312,11 @@ static inline bool tryReadSocket(int socket, void *data, NnSize size, unsigned l
                     fflush(stdout);
                     lastLogTime = now;
                 }
-                sleepOnSocketRetry();
+                {
+                    const unsigned long long tSleep0 = nowUsNet();
+                    waitOnSocketRetry(socket, false);
+                    waitUs += nowUsNet() - tSleep0;
+                }
                 continue;
             }
             throw NnTransferSocketException(0, "Error reading from socket");
@@ -261,6 +326,11 @@ static inline bool tryReadSocket(int socket, void *data, NnSize size, unsigned l
         data = (char*)data + r;
         s -= r;
         lastProgressTime = std::chrono::steady_clock::now();
+    }
+    {
+        const unsigned long long total = nowUsNet() - tEnter;
+        gSyncWaitUs.fetch_add(waitUs, std::memory_order_relaxed);
+        gSyncXferUs.fetch_add(total > waitUs ? total - waitUs : 0ull, std::memory_order_relaxed);
     }
     return true;
 }
@@ -680,8 +750,6 @@ NnNetwork::NnNetwork(std::vector<NnSocket> *sockets) {
     this->activationTxBytes.store(0);
     this->activationRxBytes.store(0);
     this->kvMigrationViolations.store(0);
-    this->syncWaitUs.store(0);
-    this->syncXferUs.store(0);
     for (NnUint i = 0; i < nSockets; i++) {
         this->sentBytes[i] = 0;
         this->recvBytes[i] = 0;
@@ -768,6 +836,30 @@ bool NnNetwork::tryReadWithMaxAttempts(NnUint socketIndex, void *data, NnSize si
     return false;
 }
 
+// readMany/writeMany 용: 아직 끝나지 않은 소켓 여러 개를 한 번에 기다린다.
+// 개별 sleep/yield 대신 poll 로 커널 대기하면 데이터 도착 즉시 깨어나면서도
+// 코어를 점유하지 않는다(SBC 는 코어가 4개뿐이라 스핀이 연산 스레드를 뺏는다).
+static inline void waitOnSocketsRetry(const int *sockets, NnSocketIo *ios, NnUint n, bool forWrite) {
+#ifndef _WIN32
+    struct pollfd pfds[16];
+    NnUint m = 0;
+    for (NnUint i = 0; i < n && m < 16; i++) {
+        if (ios[i].size == 0)
+            continue;
+        pfds[m].fd = sockets[ios[i].socketIndex];
+        pfds[m].events = forWrite ? POLLOUT : POLLIN;
+        pfds[m].revents = 0;
+        m++;
+    }
+    if (m == 0)
+        return;
+    poll(pfds, m, 1);
+#else
+    (void)sockets; (void)ios; (void)n; (void)forWrite;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
+}
+
 void NnNetwork::writeMany(NnUint n, NnSocketIo *ios) {
     bool isWriting;
     auto lastProgressTime = std::chrono::steady_clock::now();
@@ -815,9 +907,9 @@ void NnNetwork::writeMany(NnUint n, NnSocketIo *ios) {
             unsigned long long passUs = (unsigned long long)
                 std::chrono::duration_cast<std::chrono::microseconds>(passEnd - passStart).count();
             if (hasProgress)
-                syncXferUs.fetch_add(passUs, std::memory_order_relaxed);
+                gSyncXferUs.fetch_add(passUs, std::memory_order_relaxed);
             else if (isWriting)
-                syncWaitUs.fetch_add(passUs, std::memory_order_relaxed);
+                gSyncWaitUs.fetch_add(passUs, std::memory_order_relaxed);
         }
 
         if (isWriting && !hasProgress) {
@@ -845,8 +937,8 @@ void NnNetwork::writeMany(NnUint n, NnSocketIo *ios) {
                 lastLogTime = now;
             }
             auto sleepStart = std::chrono::high_resolution_clock::now();
-            sleepOnSocketRetry();
-            syncWaitUs.fetch_add((unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+            waitOnSocketsRetry(sockets, ios, n, true);
+            gSyncWaitUs.fetch_add((unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::high_resolution_clock::now() - sleepStart).count(), std::memory_order_relaxed);
         } else if (hasProgress) {
             lastProgressTime = std::chrono::steady_clock::now();
@@ -913,9 +1005,9 @@ void NnNetwork::readMany(NnUint n, NnSocketIo *ios) {
             unsigned long long passUs = (unsigned long long)
                 std::chrono::duration_cast<std::chrono::microseconds>(passEnd - passStart).count();
             if (hasProgress)
-                syncXferUs.fetch_add(passUs, std::memory_order_relaxed);
+                gSyncXferUs.fetch_add(passUs, std::memory_order_relaxed);
             else if (isReading)
-                syncWaitUs.fetch_add(passUs, std::memory_order_relaxed);
+                gSyncWaitUs.fetch_add(passUs, std::memory_order_relaxed);
         }
 
         if (isReading && !hasProgress) {
@@ -942,10 +1034,10 @@ void NnNetwork::readMany(NnUint n, NnSocketIo *ios) {
                 fflush(stdout);
                 lastLogTime = now;
             }
-            // EXP-1: 재시도 sleep도 peer 대기 시간이다.
+            // EXP-1: 재시도 대기도 peer 대기 시간이다.
             auto sleepStart = std::chrono::high_resolution_clock::now();
-            sleepOnSocketRetry();
-            syncWaitUs.fetch_add((unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+            waitOnSocketsRetry(sockets, ios, n, false);
+            gSyncWaitUs.fetch_add((unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::high_resolution_clock::now() - sleepStart).count(), std::memory_order_relaxed);
         } else if (hasProgress) {
             lastProgressTime = std::chrono::steady_clock::now();
@@ -1000,26 +1092,37 @@ void NnNetwork::resetStats() {
     activationTxBytes.store(0, std::memory_order_relaxed);
     activationRxBytes.store(0, std::memory_order_relaxed);
     kvMigrationViolations.store(0, std::memory_order_relaxed);
-    syncWaitUs.store(0, std::memory_order_relaxed);
-    syncXferUs.store(0, std::memory_order_relaxed);
+    // 주의: sync wait/xfer 카운터는 여기서 지우지 않는다.
+    // getStats() 가 마지막에 resetStats() 를 호출하므로, 여기서 지우면
+    // 호출 순서에 따라 getSyncTimeBreakdown() 이 0 을 읽게 된다(실제로 그랬다).
+    // 이 카운터는 resetSyncTimeBreakdown() 으로만 초기화한다.
 }
 
 void NnNetwork::getSyncTimeBreakdown(unsigned long long *waitUs, unsigned long long *xferUs) {
-    *waitUs = syncWaitUs.load(std::memory_order_relaxed);
-    *xferUs = syncXferUs.load(std::memory_order_relaxed);
+    *waitUs = gSyncWaitUs.load(std::memory_order_relaxed);
+    *xferUs = gSyncXferUs.load(std::memory_order_relaxed);
 }
 
 void NnNetwork::resetSyncTimeBreakdown() {
-    syncWaitUs.store(0, std::memory_order_relaxed);
-    syncXferUs.store(0, std::memory_order_relaxed);
+    gSyncWaitUs.store(0, std::memory_order_relaxed);
+    gSyncXferUs.store(0, std::memory_order_relaxed);
 }
 
 void NnNetwork::printSocketTrafficSummary(NnUint socketIndex, const char *label) const {
     if (socketIndex >= nSockets) {
-        printf("📦 [NET_TRAFFIC] invalid socket=%u for %s (nSockets=%u)\n",
-            socketIndex,
-            label == nullptr ? "unknown" : label,
-            nSockets);
+        // 종료 경로에서 이 분기가 무한 반복되어 로그가 14 GB 까지 자란 사례가 있다.
+        // 원인(호출부 루프 경계)이 확정될 때까지 출력 자체를 제한한다.
+        static std::atomic<int> invalidReports{0};
+        const int n = invalidReports.fetch_add(1, std::memory_order_relaxed);
+        if (n < 4) {
+            printf("📦 [NET_TRAFFIC] invalid socket=%u for %s (nSockets=%u)\n",
+                socketIndex,
+                label == nullptr ? "unknown" : label,
+                nSockets);
+        } else if (n == 4) {
+            printf("📦 [NET_TRAFFIC] (invalid socket 보고 억제됨 — 호출부 루프 경계 확인 필요)\n");
+            fflush(stdout);
+        }
         return;
     }
 

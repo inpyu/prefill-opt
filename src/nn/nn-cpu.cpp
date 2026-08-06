@@ -3,6 +3,7 @@
 #include "nn-cpu-ops.hpp"
 #include <cassert>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 #include <thread>
 #ifdef _WIN32
@@ -235,14 +236,34 @@ void NnCpuDeviceSegment::loadWeight(NnUint opIndex, NnSize offset, NnSize nBytes
     // 시점에만 한 번 재배치한다. root/worker 가 모두 이 경로를 지나므로
     // 별도의 "로드 완료" 훅을 두 곳에 만들 필요가 없다.
     context->loadedBytes += nBytes;
-    if (!context->isRepacked &&
+    // DLLAMA_REPACK=0 으로 끌 수 있다(진단/폴백용). DLLAMA_REPACK_LOG=1 이면 대상 op 를 찍는다.
+    static const bool repackEnabled = []{
+        const char *v = std::getenv("DLLAMA_REPACK");
+        return v == nullptr || v[0] != '0';
+    }();
+    static const bool repackLog = []{
+        const char *v = std::getenv("DLLAMA_REPACK_LOG");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (repackEnabled && !context->isRepacked &&
         context->loadedBytes >= context->weightSize.nBytes &&
         context->weightSize.floatType == F_Q40 &&
         context->weightSize.y > 0u)
     {
         const NnUint d = context->weightSize.x;              // 출력 행 수
         const NnUint kBlocks = context->weightSize.y / Q40_BLOCK_SIZE;
-        if (nnRepackSupported(d, kBlocks) &&
+        if (repackLog) {
+            printf("[repack] op=%s z=%u y=%u x=%u nBytes=%zu loaded=%zu -> d=%u kBlocks=%u %s\n",
+                context->name ? context->name : "?",
+                context->weightSize.z, context->weightSize.y, context->weightSize.x,
+                (size_t)context->weightSize.nBytes, (size_t)context->loadedBytes,
+                d, kBlocks, nnRepackSupported(d, kBlocks) ? "OK" : "SKIP");
+            fflush(stdout);
+        }
+        // z > 1 (MoE) 는 전문가별 레이아웃이 달라 아직 다루지 않는다.
+        if (context->weightSize.z <= 1u &&
+            (std::size_t)d * kBlocks * sizeof(NnBlockQ40) == (std::size_t)context->weightSize.nBytes &&
+            nnRepackSupported(d, kBlocks) &&
             nnRepackQ40InPlace(context->weight, d, kBlocks))
         {
             context->isRepacked = true;

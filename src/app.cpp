@@ -1960,7 +1960,11 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
     // Print network performance report and bottleneck analysis
     if (network != nullptr) {
         printf("📦 Root link traffic summary\n");
-        for (NnUint i = 0; i < network->nSockets; i++) {
+        // 경계를 지역변수로 고정한다.
+        // 매 반복마다 network->nSockets 를 다시 읽으면, 종료 경로에서 이 객체가
+        // 이미 정리된 뒤라 값이 불안정해져 루프가 폭주한다(로그가 18.9 GB 까지 자란 사례).
+        const NnUint nSocketsSnapshot = network->nSockets;
+        for (NnUint i = 0; i < nSocketsSnapshot; i++) {
             std::string label = "root<->worker[" + std::to_string(i + 1) + "]";
             network->printSocketTrafficSummary(i, label.c_str());
         }
@@ -2123,7 +2127,8 @@ void runWorkerApp(AppCliArgs *args) {
                     inference.printStageTimingSummary();
                 printf("📦 Worker[%u] link traffic summary\n", nodeConfig.nodeIndex);
                 network->printSocketTrafficSummary(ROOT_SOCKET_INDEX, "worker<->root");
-                for (NnUint socketIndex = 1; socketIndex < network->nSockets; socketIndex++) {
+                const NnUint nSocketsSnapshot = network->nSockets;   // 위와 동일한 이유
+                for (NnUint socketIndex = 1; socketIndex < nSocketsSnapshot; socketIndex++) {
                     std::string label = "worker-peer-socket[" + std::to_string(socketIndex) + "]";
                     network->printSocketTrafficSummary(socketIndex, label.c_str());
                 }

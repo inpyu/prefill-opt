@@ -21,6 +21,7 @@
 #include <cassert>
 #include <cstring>
 #include <vector>
+#include <cstdlib>
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -643,9 +644,19 @@ void ggml_gemm_q4_0_4x4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const vo
 
 // ---- dllama 쪽 헬퍼 ----
 
+// DLLAMA_REPACK=0 으로 repack 경로를 끌 수 있다.
+// 원인 격리(A/B)와 논문 ablation 용.
+static bool repackEnabled() {
+    static const bool enabled = []() {
+        const char *v = std::getenv("DLLAMA_REPACK");
+        return !(v != nullptr && v[0] == '0');
+    }();
+    return enabled;
+}
+
 bool nnRepackSupported(NnUint d, NnUint kBlocks) {
 #if NN_REPACK_AVAILABLE
-    return d % 4u == 0u && kBlocks > 0u;
+    return repackEnabled() && d % 4u == 0u && kBlocks > 0u;
 #else
     (void)d; (void)kBlocks;
     return false;

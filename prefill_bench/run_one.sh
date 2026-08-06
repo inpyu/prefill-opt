@@ -30,10 +30,18 @@ RUN_TIMEOUT="${RUN_TIMEOUT:-3600}"
 mkdir -p "$OUT_DIR/logs"
 LOG="$OUT_DIR/logs/$TAG.log"
 
-# --- 가드 1: 다른 dllama 추론이 돌고 있는가 (이름 변형 포함) ---
-if pgrep -f "dllama[^ ]* +(inference|worker|chat)" >/dev/null 2>&1; then
+# --- 가드 1: 다른 dllama 프로세스가 돌고 있는가 ---
+# 커맨드라인(-f)으로 찾으면 이 스크립트를 감싼 셸까지 잡힌다(래퍼 인자에 "dllama worker"
+# 같은 문자열이 들어가므로). 실행 파일 이름(comm)으로만 판정한다.
+# comm 은 15자로 잘리므로 dllama / dllama_N4 / dllama_REPACK2 등 변형도 ^dllama 로 걸린다.
+running_dllama() {
+    ps -eo pid=,comm= | awk '$2 ~ /^dllama/ {print $1}'
+}
+if [ -n "$(running_dllama)" ]; then
     echo "[중단] 다른 dllama 프로세스가 실행 중입니다:"
-    pgrep -af "dllama[^ ]* +(inference|worker|chat)" | sed 's/^/    /'
+    for p in $(running_dllama); do
+        printf '    %s\n' "$(ps -o pid=,args= -p "$p" | cut -c1-140)"
+    done
     exit 1
 fi
 
@@ -58,6 +66,22 @@ echo "== $TAG =="
 echo "   bin=$BIN"
 echo "   words=$WORDS  est_tokens=$EST_TOKENS  steps=$STEPS  max_seq_len=$MAX_SEQ"
 echo "   avail=${AVAIL}MB  (KV 예상 $(( MAX_SEQ * 1024 * 4 * 2 * 32 / 1048576 )) MB)"
+
+# --- 가드 4: 로그 크기 상한 ---
+# 종료 경로의 트래픽 요약이 무한 반복되어 로그가 14 GB 까지 자란 사례가 있다.
+# 코드에도 가드를 넣었지만, 다른 경로가 또 폭주해도 디스크가 죽지 않게 여기서도 막는다.
+MAX_LOG_MB="${MAX_LOG_MB:-200}"
+( while sleep 20; do
+    [ -f "$LOG" ] || continue
+    sz=$(( $(stat -c%s "$LOG" 2>/dev/null || echo 0) / 1048576 ))
+    if [ "$sz" -gt "$MAX_LOG_MB" ]; then
+        echo "[가드] 로그가 ${sz}MB 를 넘어 중단합니다 (상한 ${MAX_LOG_MB}MB)" >> "$LOG"
+        ps -eo pid=,comm= | awk '$2 ~ /^dllama/ {print $1}' | xargs -r kill -9 2>/dev/null
+        break
+    fi
+  done ) &
+LOG_GUARD_PID=$!
+trap 'kill $LOG_GUARD_PID 2>/dev/null' EXIT
 
 set +e
 timeout "$RUN_TIMEOUT" "$BIN" inference \
