@@ -50,6 +50,16 @@ typedef struct {
 void nnCpuOpsSetDecodePhase(bool isDecodePhase);
 bool nnCpuOpsIsDecodePhase();
 
+// 블록 병렬 시뮬레이션 (research/07 Phase A1).
+//
+// 단일 노드에서 attention 마스크만 블록 병렬과 동일하게 만들어, 분산 구현 전에
+// 근사 정확도를 먼저 측정한다. prefill 에서만 적용되고 decode 는 전체 KV 를 본다
+// (Star Attention 의 query phase 에 해당).
+//
+//   blockSize : 블록 하나의 토큰 수. 0 이면 비활성
+//   anchorLen : 모든 블록이 함께 보는 앞부분 길이. 0 이면 anchor 없음
+void nnCpuOpsSetBlockMask(NnUint blockSize, NnUint anchorLen);
+
 typedef void (*NnCpuOpForwardInit)(NnCpuOpContext *context);
 typedef void (*NnCpuOpForward)(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context);
 

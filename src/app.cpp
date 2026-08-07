@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "nn/nn-cpu-ops.hpp"
 #include <cassert>
 #include <climits>
 #include <cstring>
@@ -449,6 +450,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.spPrefillOnly = true;
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
+    args.simBlockSize = 0;
+    args.simAnchorLen = 0;
     // Default relaxed policy:
     // - strictKvAffinity=0: don't hard-fail decode-path KV movement experiments
     // - allowKvMigration=1: permit migration/sync when topology/scheduler needs it
@@ -591,6 +594,10 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             args.spPrefillOnly = args.prefillSpOnly;
         } else if (std::strcmp(name, "--sp-prefill-threshold") == 0) {
             args.spPrefillThreshold = (unsigned int)atoi(value);
+        } else if (std::strcmp(name, "--sim-block-size") == 0) {
+            args.simBlockSize = (unsigned int)atoi(value);
+        } else if (std::strcmp(name, "--sim-anchor-len") == 0) {
+            args.simAnchorLen = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--strict-kv-affinity") == 0) {
             args.strictKvAffinity = atoi(value) == 1;
         } else if (std::strcmp(name, "--allow-kv-migration") == 0) {
@@ -1942,6 +1949,13 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
 
         if (args->netMonitor)
             network->enablePerformanceMonitoring(true);
+    }
+
+    // 블록 병렬 시뮬레이션 (research/07 Phase A1). prefill attention 마스크만 바꾼다.
+    if (args->simBlockSize > 0) {
+        printf("🧱 블록 병렬 시뮬레이션: blockSize=%u anchorLen=%u\n",
+            args->simBlockSize, args->simAnchorLen);
+        nnCpuOpsSetBlockMask(args->simBlockSize, args->simAnchorLen);
     }
 
     AppInferenceContext context;

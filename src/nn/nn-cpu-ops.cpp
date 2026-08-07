@@ -810,6 +810,29 @@ static void multiheadAtt_F32(
     }
 }
 
+// 블록 병렬 시뮬레이션 설정 (research/07 Phase A1)
+static std::atomic<NnUint> gBlockSize{0};
+static std::atomic<NnUint> gAnchorLen{0};
+
+void nnCpuOpsSetBlockMask(NnUint blockSize, NnUint anchorLen) {
+    gBlockSize.store(blockSize, std::memory_order_relaxed);
+    gAnchorLen.store(anchorLen, std::memory_order_relaxed);
+}
+
+// 쿼리 위치 q 가 키 위치 t 를 볼 수 있는가.
+//
+// 블록 병렬에서 각 노드는 자기 블록만 갖고 있으므로, 쿼리는
+//   [0, anchorLen)  ∪  [자기 블록 시작, q]
+// 만 참조할 수 있다. 그 밖은 다른 노드에 있어 보이지 않는다.
+static inline bool blockMaskAllows(NnUint q, NnUint t) {
+    const NnUint bs = gBlockSize.load(std::memory_order_relaxed);
+    if (bs == 0u)
+        return true;                       // 비활성: 평소대로 causal
+    if (t < gAnchorLen.load(std::memory_order_relaxed))
+        return true;                       // anchor 는 모두가 본다
+    return (t / bs) == (q / bs);           // 같은 블록 안
+}
+
 // Prefill 배치 어텐션.
 //
 // 기존 multiheadAtt_F32 는 쿼리 위치 1개를 전제로 만들어진 decode용 커널이고,
@@ -873,8 +896,11 @@ static void multiheadAttBatch_F32(
             for (NnUint j = 0; j < nHeadsInGroup; j++) {
                 const NnUint h0 = h0Base + j;
                 for (NnUint b = 0; b < batchSize; b++) {
-                    if (t > (NnUint)positions[b])
+                    const NnUint qPos = (NnUint)positions[b];
+                    if (t > qPos)
                         continue;             // causal mask
+                    if (!blockMaskAllows(qPos, t))
+                        continue;             // 블록 병렬 마스크 (Phase A1)
                     const float *hQ = &query[b * qSliceD0 + h0 * headDim];
                     att[(b * nHeads0 + h0) * seqLen + t] =
                         dotProduct_F32(hQ, posK, headDim) / headDimRoot;
@@ -902,7 +928,10 @@ static void multiheadAttBatch_F32(
             for (NnUint j = 0; j < nHeadsInGroup; j++) {
                 const NnUint h0 = h0Base + j;
                 for (NnUint b = 0; b < batchSize; b++) {
-                    if (t > (NnUint)positions[b])
+                    const NnUint qPos = (NnUint)positions[b];
+                    if (t > qPos)
+                        continue;
+                    if (!blockMaskAllows(qPos, t))
                         continue;
                     const float posA = att[(b * nHeads0 + h0) * seqLen + t];
                     float *hY = &((float *)outputs[b])[h0 * headDim];

@@ -94,6 +94,9 @@ public:
     bool spPrefillOnly;
     bool prefillSpOnly;
     NnUint spPrefillThreshold;
+    // 블록 병렬 시뮬레이션 (research/07 Phase A1). 0 이면 비활성.
+    NnUint simBlockSize;
+    NnUint simAnchorLen;
     bool strictKvAffinity;
     bool allowKvMigration;
     NnFloatType pipelineFloatType;
