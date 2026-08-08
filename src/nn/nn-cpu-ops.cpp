@@ -2327,7 +2327,12 @@ static void shiftForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint bat
     for (NnUint batchIndex = shBegin; batchIndex < shBegin + shCount; batchIndex++) {
         const NnSize index = (NnSize)indexes[batchIndex];
         // SP write guard: only write if position is in this rank's local sequence range
-        if (config->localSeqLen > 0) {
+        //
+        // CP 가 켜지면 이 가드를 끈다. SP 구간은 seqLen 기준이고 CP 블록은 batchSize
+        // 기준이라 둘이 어긋난다(seqLen 704 / batch 448 이면 워커의 position 224~351 이
+        // 자기 SP 구간 [352,704) 밖이라 통째로 버려져 KV 에 구멍이 났다).
+        // CP 창이 이미 "자기 행만 쓴다"를 보장하므로 가드가 중복이다.
+        if (config->localSeqLen > 0 && gCpSize.load(std::memory_order_relaxed) <= 1u) {
             if (index < config->localSeqStart || index >= config->localSeqStart + config->localSeqLen)
                 continue;
         }

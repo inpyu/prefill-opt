@@ -1848,6 +1848,13 @@ static void syncNodeSlices(bool onlyFromWorkerToRoot,
     }
 }
 
+// CP 분할 여부. allgather 의 구간 계산 기준이 달라진다(위 blockRange 참조).
+static std::atomic<bool> gNetworkCpSplit{false};
+
+void nnNetworkSetCpSplit(bool enabled) {
+    gNetworkCpSplit.store(enabled, std::memory_order_relaxed);
+}
+
 NnNetworkNodeSynchronizer::NnNetworkNodeSynchronizer(NnNetwork *network, NnNetExecution *execution, NnNetConfig *netConfig, NnNodeConfig *nodeConfig, CollectiveType collectiveType, bool spPrefillOnly, bool strictKvAffinity, bool allowKvMigration) {
     this->network = network;
     this->execution = execution;
@@ -1935,6 +1942,9 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
             } else if (syncConfig->syncType == SYNC_SP_KV) {
                 // SYNC_SP_KV is handled outside the batch loop (see below)
                 break;
+            } else if (syncConfig->syncType == SYNC_CP_LOGITS) {
+                // 배치 루프 밖에서 처리한다 (아래)
+                break;
             } else {
                 throw std::invalid_argument("Unknown sync type");
             }
@@ -1946,6 +1956,47 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
                 NnSize totalBytes = batchBytes * execution->batchSize;
                 network->recordOperation(syncTypeName, 0, totalBytes, syncStartTime, syncEndTime);
             }
+        }
+
+        // SYNC_CP_LOGITS: 마지막 토큰 행의 로짓을 root 로 회수한다.
+        //
+        // Ring CP 에서는 노드가 배치의 자기 블록만 계산하므로 마지막 행은 spRank N-1
+        // 에만 있다. root 는 그 로짓으로 첫 토큰을 샘플링해야 한다.
+        // 블록 배정을 회전시켜 root 에게 마지막 블록을 주는 방법도 있었지만,
+        // SYNC_SP_KV 의 수신 측이 peerStart = spRank * localSeqLen 으로 구간을
+        // 계산하기 때문에 회전시키면 KV 에 구멍이 난다.
+        if (syncConfig->syncType == SYNC_CP_LOGITS) {
+            if (threadIndex != 0) continue;
+            if (execution->batchSize <= 1u) continue;  // decode 는 모든 노드가 같은 값을 낸다
+
+            const NnUint tpSizeL = nodeConfig->tpGroupEnd - nodeConfig->tpGroupStart;
+            if (tpSizeL == 0u) continue;
+            const NnUint spSizeL = (nodeConfig->spGroupEnd - nodeConfig->spGroupStart) / tpSizeL;
+            if (spSizeL <= 1u) continue;
+            const NnUint mySpRank = (nodeConfig->nodeIndex - nodeConfig->spGroupStart) / tpSizeL;
+            const NnUint myTpRank = nodeConfig->nodeIndex - nodeConfig->tpGroupStart;
+
+            const NnPipeConfig *lgConfig = &netConfig->pipes[syncConfig->pipeIndex];
+            const NnSize rowBytes = lgConfig->size.nBytes / netConfig->nBatches;
+            NnByte *lg = execution->pipes[syncConfig->pipeIndex];
+            NnByte *lastRow = lg + (NnSize)(execution->batchSize - 1u) * rowBytes;
+
+            const NnUint senderSpRank = spSizeL - 1u;
+            const NnUint rootNode = nodeConfig->spGroupStart + myTpRank;
+            const NnUint senderNode = nodeConfig->spGroupStart + senderSpRank * tpSizeL + myTpRank;
+            if (senderNode == rootNode)
+                continue;
+
+            if (mySpRank == senderSpRank) {
+                const NnUint sock = getSocketIndexForNode(nodeConfig->nodeIndex, rootNode);
+                network->write(sock, lastRow, rowBytes);
+                network->addTaggedTraffic(false, rowBytes, 0);
+            } else if (nodeConfig->nodeIndex == rootNode) {
+                const NnUint sock = getSocketIndexForNode(nodeConfig->nodeIndex, senderNode);
+                network->read(sock, lastRow, rowBytes);
+                network->addTaggedTraffic(false, 0, rowBytes);
+            }
+            continue;
         }
 
         // SYNC_SP_KV: allgather K and V buffers across SP group
@@ -1989,9 +2040,29 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
             NnByte *kBuf = execution->nodeBuffers[syncConfig->spKvKBufferIndex];
             NnByte *vBuf = execution->nodeBuffers[syncConfig->spKvVBufferIndex];
 
-            // My slice bounds
-            NnUint myStart  = syncConfig->spKvLocalSeqStart;
-            NnUint myEnd    = myStart + syncConfig->spKvLocalSeqLen;
+            // 구간 계산.
+            //
+            // 기본(SP)은 seqLen/N 로 자른 고정 구간이다. CP 가 켜지면 노드가 계산하는
+            // 것은 "배치 행 블록"이고 그 position 은 batchSize 기준이라 기준이 다르다.
+            // 그래서 CP 에서는 각 rank 의 블록 첫/마지막 행의 position 으로 구간을 잡는다.
+            // (cpRowWindow 와 같은 균등 분할: 앞쪽 rem 개 블록이 1행씩 더 가진다)
+            const bool cpOn = gNetworkCpSplit.load(std::memory_order_relaxed) && execution->batchSize > 1u;
+            auto blockRange = [&](NnUint rank, NnUint *lo, NnUint *hi) {
+                const NnUint base = execution->batchSize / actualSpSize;
+                const NnUint rem = execution->batchSize % actualSpSize;
+                const NnUint b0 = rank * base + (rank < rem ? rank : rem);
+                const NnUint cnt = base + (rank < rem ? 1u : 0u);
+                *lo = (NnUint)positions[b0];
+                *hi = (NnUint)positions[b0 + cnt - 1u] + 1u;
+            };
+
+            NnUint myStart, myEnd;
+            if (cpOn) {
+                blockRange(mySpRank, &myStart, &myEnd);
+            } else {
+                myStart = syncConfig->spKvLocalSeqStart;
+                myEnd   = myStart + syncConfig->spKvLocalSeqLen;
+            }
             NnUint myActive = (maxPos + 1 < myEnd) ? (maxPos + 1) : myEnd;
             NnSize sendBytes = (myActive > myStart) ? (myActive - myStart) * kvDim0Bytes : 0;
 
@@ -2003,8 +2074,13 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
                 NnUint peerSocket = getSocketIndexForNode(myNodeIndex, peerNode);
 
                 // Peer slice range
-                NnUint peerStart  = spRankPeer * syncConfig->spKvLocalSeqLen;
-                NnUint peerEnd    = peerStart + syncConfig->spKvLocalSeqLen;
+                NnUint peerStart, peerEnd;
+                if (cpOn) {
+                    blockRange(spRankPeer, &peerStart, &peerEnd);
+                } else {
+                    peerStart = spRankPeer * syncConfig->spKvLocalSeqLen;
+                    peerEnd   = peerStart + syncConfig->spKvLocalSeqLen;
+                }
                 NnUint peerActive = (maxPos + 1 < peerEnd) ? (maxPos + 1) : peerEnd;
                 NnSize recvBytes  = (peerActive > peerStart) ? (peerActive - peerStart) * kvDim0Bytes : 0;
 

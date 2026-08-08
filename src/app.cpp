@@ -2061,7 +2061,8 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
     if (args->cpSplit) {
         const NnNodePlacement pl = topology.getPlacement(0);
         nnCpuOpsSetCpRange(topology.spSize, pl.spRank);
-        printf("🔗 CP 분할: spSize=%u rank=%u (root 는 마지막 블록)\n", topology.spSize, pl.spRank);
+        nnNetworkSetCpSplit(true);
+        printf("🔗 CP 분할: spSize=%u rank=%u\n", topology.spSize, pl.spRank);
     }
     nnCpuOpsSetAttnFused(args->attnFused);
     if (args->attnFused == 0)
@@ -2135,6 +2136,7 @@ void runWorkerApp(AppCliArgs *args) {
                     ? (nodeConfig.spGroupEnd - nodeConfig.spGroupStart) / tpSizeLocal
                     : 1u;
                 nnCpuOpsSetCpRange(spSizeLocal, nodeConfig.spRank);
+                nnNetworkSetCpSplit(true);
                 printf("🔗 CP 분할: spSize=%u rank=%u\n", spSizeLocal, nodeConfig.spRank);
             }
 

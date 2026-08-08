@@ -26,6 +26,9 @@ if [ "$#" -gt 0 ]; then HOSTS=("$@"); else HOSTS=("${ALL_WORKERS[@]:0:$N}"); fi
 
 REMOTE_BIN="${REMOTE_BIN:-/home/ubuntu/dllama}"
 PORT="${WORKER_PORT:-9998}"
+# 워커에만 필요한 추가 인자. 워커는 root 의 CLI 를 받지 않으므로 여기서 넘긴다.
+#   WORKER_EXTRA="--cp-split 1" bash start_workers.sh 3
+WORKER_EXTRA="${WORKER_EXTRA:-}"
 LOG="/home/ubuntu/dllama_worker_${PORT}.log"
 
 LOCAL_MD5="$(md5sum "$BIN" | awk '{print $1}')"
@@ -53,7 +56,7 @@ for h in "${HOSTS[@]}"; do
         if ss -ltn 2>/dev/null | grep -q ':$PORT '; then echo 'PORT_BUSY'; exit 0; fi
         # 3) 기동
         rm -f $LOG
-        nohup taskset -c 0-3 $REMOTE_BIN worker --port $PORT --nthreads ${NTHREADS} > $LOG 2>&1 &
+        nohup taskset -c 0-3 $REMOTE_BIN worker --port $PORT --nthreads ${NTHREADS} ${WORKER_EXTRA} > $LOG 2>&1 &
         # 4) LISTEN 확인
         for i in \$(seq 1 20); do
             sleep 0.5

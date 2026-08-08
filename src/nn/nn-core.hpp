@@ -125,6 +125,9 @@ enum NnSyncType {
     SYNC_NODE_SLICES, // all-reduce (sum) over full pipe buffer
     SYNC_NODE_SLICES_EXCEPT_ROOT, // only workers send slices to root, root does not send
     SYNC_SP_KV, // allgather K and V buffers across SP group (ring attention)
+    // Ring CP: 마지막 토큰 행의 로짓을 그 행을 계산한 노드(spRank N-1)에서 root 로 보낸다.
+    // CP 에서는 노드가 자기 토큰 블록만 계산하므로 마지막 행이 root 에 없다.
+    SYNC_CP_LOGITS,
 };
 
 enum NnRopeType {

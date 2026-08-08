@@ -89,6 +89,8 @@ struct NnSocketIo {
     NnSize size;
 };
 
+void nnNetworkSetCpSplit(bool enabled);
+
 class NnNetwork {
 private:
     int *sockets;

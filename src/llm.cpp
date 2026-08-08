@@ -676,6 +676,12 @@ LlmNet buildLlmNet(
                     NnMatmulOpConfig{});
             }
             end.addSync(n.logitsPipeIndex, SYNC_NODE_SLICES);
+            if (topology.spSize > 1) {
+                // CP: 마지막 행 로짓을 spRank N-1 -> root 로 회수한다.
+                // CP 가 꺼진 SP 모드에서는 모든 노드가 같은 값을 계산하므로 무해하다
+                // (전송 비용만 든다). 핸들러가 batchSize==1 이면 건너뛴다.
+                end.addSync(n.logitsPipeIndex, SYNC_CP_LOGITS);
+            }
 
             nodeBuilder.addSegment(end.build());
         }
