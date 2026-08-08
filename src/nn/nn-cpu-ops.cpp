@@ -1599,13 +1599,29 @@ void nnCpuOpsSetAttnFused(int mode) {
     gAttnFusedMode.store(mode, std::memory_order_relaxed);
 }
 
-// 융합이 이득인 경계. 쿼리 타일 BR=32 이므로 그 이하에서는 타일 루프가 한 번만
-// 돌아 재스케일 패스만 늘어난다 (실측 B=32 에서 2,393 -> 2,585 ms 로 손해).
+// auto 는 항상 융합을 쓴다.
+//
+// 처음엔 "B <= BR(32) 이면 타일 루프가 한 번만 돌아 손해"라고 보고 B > 32 에서만
+// 켰다. 근거였던 측정(B=32 에서 2,393 -> 2,585 ms)이 **실행 순서 효과**였다.
+// 설정을 순차로 돌리면 뒤에 오는 쪽이 불리해진다 — 커널과 무관한 gemm(+558)과
+// ffn(+517)까지 같이 늘어난 것이 증거다.
+//
+// off/on 을 번갈아 4라운드 돌리자 결과가 뒤집혔다 (B=32, attn ms):
+//     round  f=0    f=1
+//       1    2,468  2,370
+//       2    2,483  2,367
+//       3    2,519  2,369
+//       4    2,485  2,326
+// 4/4 라운드 모두 융합이 빠르다. prefill 총합의 차이는 부호가 엇갈려 노이즈다.
+//
+// 게다가 융합은 더 정확하고(float64 대비 9.311e-4 vs 9.789e-4) B 천장도 없앤다.
+// 임계값을 둘 이유가 없다.
 static inline bool attnFusedFor(NnUint batchSize) {
+    (void)batchSize;
     const int mode = gAttnFusedMode.load(std::memory_order_relaxed);
     if (mode >= 0)
         return mode == 1;
-    return batchSize > 32u;
+    return true;
 }
 
 void nnCpuOpsSetDecodePhase(bool isDecodePhase) {
