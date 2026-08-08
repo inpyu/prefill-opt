@@ -95,6 +95,7 @@ public:
     bool prefillSpOnly;
     NnUint spPrefillThreshold;
     // 블록 병렬 시뮬레이션 (research/07 Phase A1). 0 이면 비활성.
+    NnUint pplBatch;  // perplexity 배치 폭. >1 이면 prefill 배치 커널을 탄다
     int attnFused;    // prefill attention 융합: -1=auto(B로 결정), 0=off, 1=on
     NnUint simBlockSize;
     NnUint simAnchorLen;

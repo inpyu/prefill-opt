@@ -824,6 +824,10 @@ void nnCpuOpsSetBlockMask(NnUint blockSize, NnUint anchorLen) {
 // 블록 병렬에서 각 노드는 자기 블록만 갖고 있으므로, 쿼리는
 //   [0, anchorLen)  ∪  [자기 블록 시작, q]
 // 만 참조할 수 있다. 그 밖은 다른 노드에 있어 보이지 않는다.
+static inline bool blockMaskActive() {
+    return gBlockSize.load(std::memory_order_relaxed) != 0u;
+}
+
 static inline bool blockMaskAllows(NnUint q, NnUint t) {
     const NnUint bs = gBlockSize.load(std::memory_order_relaxed);
     if (bs == 0u)
@@ -1126,15 +1130,49 @@ static void multiheadAttFused_F32(
 #endif
                     }
 
+                    // exp 는 반드시 softmax_F32 와 같은 expf_neon 을 쓴다.
+                    //
+                    // 처음에 libm expf 를 썼더니 기존 커널과 상대 L2 오차가 1e-3 이
+                    // 났다(재결합이면 1e-6 수준이어야 한다). 원인은 버그가 아니라
+                    // softmax_F32 가 근사 벡터 지수 expf_neon 을 쓰기 때문이었다.
+                    // 두 커널이 A/B 로 비교되려면 같은 근사를 써야 하고, 원소마다
+                    // 스칼라 expf 를 부르는 비용도 사라진다.
                     float sum = 0.0f;
-                    for (NnUint t = t0; t < t1; t++) {
-                        if (t > qPos || !blockMaskAllows(qPos, t)) {
-                            tile[t - t0] = 0.0f;
-                            continue;
+                    // causal 이면 허용 구간이 [t0, tEnd) 로 연속이라 벡터화된다.
+                    // 블록 마스크가 켜져 있을 때만 구멍이 생기므로 그때는 스칼라로 간다.
+                    const NnUint tEnd = std::min(t1, qPos + 1u);
+#if defined(__ARM_NEON)
+                    if (!blockMaskActive()) {
+                        const float32x4_t vm = vdupq_n_f32(mNew);
+                        float32x4_t vsum = vdupq_n_f32(0.0f);
+                        NnUint t = t0;
+                        for (; t + 4 <= tEnd; t += 4) {
+                            const float32x4_t p =
+                                expf_neon(vsubq_f32(vld1q_f32(&tile[t - t0]), vm));
+                            vst1q_f32(&tile[t - t0], p);
+                            vsum = vaddq_f32(vsum, p);
                         }
-                        const float p = expf(tile[t - t0] - mNew);
-                        tile[t - t0] = p;
-                        sum += p;
+                        const float32x2_t lo = vadd_f32(vget_low_f32(vsum), vget_high_f32(vsum));
+                        sum = vget_lane_f32(lo, 0) + vget_lane_f32(lo, 1);
+                        for (; t < tEnd; t++) {
+                            const float p = expf(tile[t - t0] - mNew);
+                            tile[t - t0] = p;
+                            sum += p;
+                        }
+                        if (tEnd < t1)
+                            std::memset(&tile[tEnd - t0], 0, (t1 - tEnd) * sizeof(float));
+                    } else
+#endif
+                    {
+                        for (NnUint t = t0; t < t1; t++) {
+                            if (t > qPos || !blockMaskAllows(qPos, t)) {
+                                tile[t - t0] = 0.0f;
+                                continue;
+                            }
+                            const float p = expf(tile[t - t0] - mNew);
+                            tile[t - t0] = p;
+                            sum += p;
+                        }
                     }
                     stateM[slot] = mNew;
                     stateL[slot] += sum;

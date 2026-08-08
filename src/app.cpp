@@ -450,6 +450,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.spPrefillOnly = true;
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
+    args.pplBatch = 1;
     args.attnFused = -1; // auto
     args.simBlockSize = 0;
     args.simAnchorLen = 0;
@@ -605,6 +606,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             // "auto" 면 0 을 sentinel 로 두고, 헤더/프롬프트/가용메모리를 아는
             // 그래프 생성 시점(resolveAutoNBatches)에서 확정한다.
             args.nBatches = (std::strcmp(value, "auto") == 0) ? 0u : (unsigned int)atoi(value);
+        } else if (std::strcmp(name, "--ppl-batch") == 0) {
+            args.pplBatch = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--attn-fused") == 0) {
             // auto | 0 | 1. 0 이면 att 를 통째로 실체화하는 기존 커널(A/B 비교용).
             args.attnFused = (std::strcmp(value, "auto") == 0) ? -1 : (atoi(value) == 1 ? 1 : 0);

@@ -787,8 +787,46 @@ static void perplexity(AppInferenceContext *context) {
     float totalLogProb = 0.0f;
     NnUint pos = 0;
 
-    context->inference->setBatchSize(1);
+    // 배치 perplexity.
+    //
+    // 기본 경로는 setBatchSize(1) 로 토큰을 하나씩 흘린다. 그래서 prefill 의 배치
+    // attention 커널(multiheadAttBatch_F32 / multiheadAttFused_F32)을 **전혀 타지
+    // 않는다.** 그 경로를 검증하려면 배치 폭을 1보다 크게 줘야 한다.
+    //
+    // decodePhase(true) 를 유지하는 이유: prefill 에서는 lm_head 가 마지막 행만
+    // 계산하므로(research/06 §4) 토큰별 로짓을 얻을 수 없다.
+    //
+    //   --ppl-batch 32   기존 배치 커널
+    //   --ppl-batch 112  융합 커널(auto 는 batchSize > 32 에서 켠다)
+    const NnUint pplBatch = std::max(1u, std::min(context->args->pplBatch, context->args->nBatches));
     context->inference->setDecodePhase(true);
+
+    if (pplBatch > 1u) {
+        printf("   (배치 perplexity: width=%u)\n", pplBatch);
+        const NnUint nEval = (NnUint)(nInputTokens - 1);
+        for (NnUint s = 0; s < nEval; s += pplBatch) {
+            const NnUint n = std::min(pplBatch, nEval - s);
+            context->inference->setBatchSize(n);
+            context->inference->setPosition(s);
+            for (NnUint i = 0; i < n; i++)
+                context->inference->setToken(i, inputTokens[s + i]);
+            context->inference->forward();
+
+            for (NnUint i = 0; i < n; i++) {
+                float *logits = &context->inference->logitsPipe[(std::size_t)i * context->header->vocabSize];
+                softmax_F32(logits, context->header->vocabSize);
+                const float prob = logits[inputTokens[s + i + 1]];
+                totalLogProb += std::log(std::max(prob, 1e-30f));
+            }
+        }
+        const float avgLogProbB = totalLogProb / (float)(nInputTokens - 1);
+        printf("\nResults\n");
+        printf("   perplexity: %f (lower = better)\n", expf(-avgLogProbB));
+        printf("   avgLogProb: %f\n", avgLogProbB);
+        return;
+    }
+
+    context->inference->setBatchSize(1);
 
     for (pos = 0; pos < nInputTokens - 1; pos++) {
         context->inference->setPosition(pos);
