@@ -1968,8 +1968,8 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
         if (syncConfig->syncType == SYNC_CP_LOGITS) {
             static std::atomic<int> dbg{0};
             if (dbg.fetch_add(1) < 3)
-                printf("[CP_LOGITS] node=%u thread=%u batchSize=%u\n",
-                    nodeConfig->nodeIndex, threadIndex, execution->batchSize);
+                { printf("[CP_LOGITS] node=%u thread=%u batchSize=%u\n",
+                    nodeConfig->nodeIndex, threadIndex, execution->batchSize); fflush(stdout); }
             if (threadIndex != 0) continue;
             if (execution->batchSize <= 1u) continue;  // decode 는 모든 노드가 같은 값을 낸다
 
@@ -1993,17 +1993,25 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
 
             static std::atomic<int> dbg2{0};
             if (dbg2.fetch_add(1) < 3)
-                printf("[CP_LOGITS] node=%u mySpRank=%u sender=%u root=%u rowBytes=%zu\n",
-                    nodeConfig->nodeIndex, mySpRank, senderNode, rootNode, (size_t)rowBytes);
+                { printf("[CP_LOGITS] node=%u mySpRank=%u sender=%u root=%u rowBytes=%zu\n",
+                    nodeConfig->nodeIndex, mySpRank, senderNode, rootNode, (size_t)rowBytes); fflush(stdout); }
+            auto maxabsOf = [&](const NnByte *row, const char *tag) {
+                const float *f = (const float *)row;
+                const NnUint n = (NnUint)(rowBytes / sizeof(float));
+                float mx = 0.0f;
+                for (NnUint i = 0; i < n; i++) { const float a = f[i] < 0 ? -f[i] : f[i]; if (a > mx) mx = a; }
+                printf("[CP_X] node=%u %s maxabs=%f nfloat=%u\n", nodeConfig->nodeIndex, tag, mx, n);
+                fflush(stdout);
+            };
             auto argmaxOf = [&](const NnByte *row) {
                 const float *f = (const float *)row;
                 const NnUint n = (NnUint)(rowBytes / sizeof(float));
                 NnUint best = 0; float bv = f[0];
                 for (NnUint i = 1; i < n; i++) if (f[i] > bv) { bv = f[i]; best = i; }
-                printf("[CP_LOGITS] node=%u argmax=%u val=%f\n", nodeConfig->nodeIndex, best, bv);
+                printf("[CP_LOGITS] node=%u argmax=%u val=%f\n", nodeConfig->nodeIndex, best, bv); fflush(stdout);
             };
             if (mySpRank == senderSpRank) {
-                argmaxOf(lastRow);
+                maxabsOf(lastRow, "send");
                 const NnUint sock = getSocketIndexForNode(nodeConfig->nodeIndex, rootNode);
                 network->write(sock, lastRow, rowBytes);
                 network->addTaggedTraffic(false, rowBytes, 0);
@@ -2011,7 +2019,7 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
                 const NnUint sock = getSocketIndexForNode(nodeConfig->nodeIndex, senderNode);
                 network->read(sock, lastRow, rowBytes);
                 network->addTaggedTraffic(false, 0, rowBytes);
-                argmaxOf(lastRow);
+                maxabsOf(lastRow, "recv");
             }
             continue;
         }

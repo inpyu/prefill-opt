@@ -603,6 +603,11 @@ LlmNet buildLlmNet(
                 size0(),
                 NnCastOpCodeConfig{});
             ff.addSync(zqPipeIndex, SYNC_NODE_SLICES);
+            // NOTE: 여기에 SYNC_CP_LOGITS 를 걸어 마지막 행 은닉 상태를 옮기려 했으나
+            // 되돌렸다. 이 지점의 xPipe 는 살아 있는 잔차가 아니다 — 송신/수신 양쪽에서
+            // maxabs=0 이었고, CP 를 끈 SP2 까지 깨졌다(원래는 정상 동작).
+            // 잔차는 레이어 사이에 노드 로컬 버퍼에 있고 xPipe 는 그 시점에 비어 있다.
+            // 로짓 회수는 실제 잔차가 있는 버퍼를 찾아 다시 설계해야 한다.
 
             nodeBuilder.addSegment(att.build());
             nodeBuilder.addSegment(ff.build());
@@ -676,12 +681,6 @@ LlmNet buildLlmNet(
                     NnMatmulOpConfig{});
             }
             end.addSync(n.logitsPipeIndex, SYNC_NODE_SLICES);
-            if (topology.spSize > 1) {
-                // CP: 마지막 행 로짓을 spRank N-1 -> root 로 회수한다.
-                // CP 가 꺼진 SP 모드에서는 모든 노드가 같은 값을 계산하므로 무해하다
-                // (전송 비용만 든다). 핸들러가 batchSize==1 이면 건너뛴다.
-                end.addSync(n.logitsPipeIndex, SYNC_CP_LOGITS);
-            }
 
             nodeBuilder.addSegment(end.build());
         }
