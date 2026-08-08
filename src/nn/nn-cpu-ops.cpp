@@ -839,9 +839,7 @@ void nnCpuOpsSetBlockMask(NnUint blockSize, NnUint anchorLen) {
 //   - KV shift: 창 밖 행을 쓰면 allgather 로 다른 노드에 오염이 퍼진다.
 //   - lm_head: 마지막 행이 있어야 한다.
 //
-// 그래서 **root(rank 0)에게 마지막 블록**을 준다. root 가 로짓을 읽고 샘플링하므로
-// 마지막 토큰이 root 에 있으면 로짓 회수 경로를 새로 만들 필요가 없다.
-// 덤으로 attention 이 가장 무거운 블록이 16GB 머신인 root 에 간다.
+// 블록 배정은 spRank 를 그대로 따른다(cpRowWindow 주석 참조).
 static std::atomic<NnUint> gCpSize{1u};
 static std::atomic<NnUint> gCpRank{0u};
 
@@ -858,8 +856,17 @@ static inline void cpRowWindow(NnUint batchSize, NnUint *begin, NnUint *count) {
         *count = batchSize;
         return;
     }
-    const NnUint rank = gCpRank.load(std::memory_order_relaxed);
-    const NnUint blockIdx = (rank + n - 1u) % n;   // rank 0 -> 마지막 블록
+    // 블록 번호 = spRank 여야 한다.
+    //
+    // 처음에는 rank 0(root)에게 마지막 블록을 줘서 lm_head 를 공짜로 해결하려 했다.
+    // 그런데 SYNC_SP_KV allgather 가 노드별 spKvLocalSeqStart(= spRank * seqLen/N)를
+    // 그대로 쓰고, shift 에도 같은 기준의 position 가드가 걸려 있다. 블록을 회전시키면
+    // 노드가 계산한 행의 position 과 그 노드가 KV 를 쓸 수 있는 구간이 어긋나
+    // **KV 에 구멍이 난다.** 기존 SP 기계와 정렬하는 쪽이 맞다.
+    //
+    // 대가: 마지막 토큰이 rank N-1 에 있어 root 의 lm_head 입력이 비어 있다.
+    // 로짓 회수 경로가 별도로 필요하다(7-4b).
+    const NnUint blockIdx = gCpRank.load(std::memory_order_relaxed);
     const NnUint base = batchSize / n;
     const NnUint rem = batchSize % n;              // 앞쪽 rem 개 블록이 1행씩 더
     *begin = blockIdx * base + (blockIdx < rem ? blockIdx : rem);
@@ -1691,7 +1698,7 @@ bool nnCpuOpsIsDecodePhase() {
 static inline void lmHeadRowRange(const NnCpuOpContext *context, NnUint batchSize,
                                   NnUint *rowBegin, NnUint *rowCount) {
     if (context->isLmHead && batchSize > 1u && !nnCpuOpsIsDecodePhase()) {
-        // 마지막 행만. 그 행은 root 의 블록에 있다(cpRowWindow 참조).
+        // 마지막 행만. 그 행은 rank N-1 의 블록에 있다 -> 로짓 회수 필요(7-4b).
         *rowBegin = batchSize - 1u;
         *rowCount = 1u;
         return;
