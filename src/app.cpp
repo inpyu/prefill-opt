@@ -450,6 +450,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.spPrefillOnly = true;
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
+    args.attnFused = true;
     args.simBlockSize = 0;
     args.simAnchorLen = 0;
     // Default relaxed policy:
@@ -604,6 +605,9 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             // "auto" 면 0 을 sentinel 로 두고, 헤더/프롬프트/가용메모리를 아는
             // 그래프 생성 시점(resolveAutoNBatches)에서 확정한다.
             args.nBatches = (std::strcmp(value, "auto") == 0) ? 0u : (unsigned int)atoi(value);
+        } else if (std::strcmp(name, "--attn-fused") == 0) {
+            // 0 이면 att 를 통째로 실체화하는 기존 커널로 되돌린다(A/B 비교용).
+            args.attnFused = atoi(value) == 1;
         } else if (std::strcmp(name, "--sim-block-size") == 0) {
             args.simBlockSize = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--sim-anchor-len") == 0) {
@@ -2037,6 +2041,10 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
     }
 
     // 블록 병렬 시뮬레이션 (research/07 Phase A1). prefill attention 마스크만 바꾼다.
+    nnCpuOpsSetAttnFused(args->attnFused);
+    if (!args->attnFused)
+        printf("🔀 attention: 기존 커널(att 전체 실체화)\n");
+
     if (args->simBlockSize > 0) {
         printf("🧱 블록 병렬 시뮬레이션: blockSize=%u anchorLen=%u\n",
             args->simBlockSize, args->simAnchorLen);

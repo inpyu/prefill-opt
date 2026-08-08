@@ -952,6 +952,247 @@ static void multiheadAttBatch_F32(
     }
 }
 
+// ---------------------------------------------------------------------------
+// 온라인 소프트맥스 융합 attention (FlashAttention 계열)
+//
+// multiheadAttBatch_F32 는 점수 행렬 att 를 (batchSize x nHeads0 x seqLen) 로
+// 통째로 실체화한다. 이 버퍼가 Pi5 의 L3 2 MB 를 넘어가는 순간 매 청크가 DRAM
+// 왕복이 되고, 그것이 prefill 청크 폭 B 의 천장이었다 (research/06 §4.7):
+//
+//     B      attn(ms)      att 버퍼
+//     32       2,548        2.8 MB
+//     112      9,340        9.6 MB
+//     448     43,838       38.5 MB
+//
+// 여기서는 키를 TILE 개씩 끊어 처리하며 (running max m, running sum l) 을
+// 유지한다. 점수 스크래치가 seqLen 이 아니라 TILE 에 비례하므로 위 천장이 사라진다.
+//
+//     m_new = max(m_old, max_t s_t)
+//     alpha = exp(m_old - m_new)          // 이전 누적분 재스케일 계수
+//     l     = alpha*l + sum_t exp(s_t - m_new)
+//     o     = alpha*o + sum_t exp(s_t - m_new) * V_t
+//     최종   o /= l
+//
+// 수학적으로는 기존 커널과 같은 값이지만 부동소수점 연산 순서가 달라지므로
+// bit-exact 하지는 않다. 검증은 greedy(temperature 0) 출력 토큰 일치로 한다.
+//
+// 타일 안에서 t 를 바깥 루프로 두는 구조는 기존 커널에서 그대로 가져왔다.
+// K/V 의 한 위치를 읽어 배치 전체가 재사용하는 것이 이 커널의 핵심 국소성이다.
+static void multiheadAttFused_F32(
+    NnByte **outputs,
+    const float *query, const NnUint qSliceD0,
+    const float *keyCache, const float *valueCache,
+    const float *positions, const NnUint batchSize,
+    const NnUint nHeads, const NnUint nHeads0, const NnUint nKvHeads,
+    const NnUint kvDim0, const NnUint headDim, const NnUint seqLen,
+    const NnUint nThreads, const NnUint threadIndex)
+{
+    (void)seqLen;
+    const NnUint kvMul = nHeads / nKvHeads;
+    const float headDimRoot = sqrtf(headDim);
+    const NnUint nGroups = (kvMul > 0u && nHeads0 % kvMul == 0u) ? (nHeads0 / kvMul) : 0u;
+    const bool groupSplit = nGroups >= nThreads && nGroups > 0u;
+
+    NnUint h0Begin, h0Limit, headStride;
+    if (groupSplit) {
+        SPLIT_THREADS(gStart, gEnd, nGroups, nThreads, threadIndex);
+        h0Begin = gStart * kvMul;
+        h0Limit = gEnd * kvMul;
+        headStride = kvMul;
+    } else {
+        SPLIT_THREADS(hStart, hEnd, nHeads0, nThreads, threadIndex);
+        h0Begin = hStart;
+        h0Limit = hEnd;
+        headStride = 1u;
+    }
+
+    // 타일 폭. B=32 / kvMul=4 기준 스크래치는 32*4*128*4B = 64 kB 로 L2(코어당
+    // 512 kB) 안에 들어온다. seqLen 과 무관하다는 점이 이 커널의 요지다.
+    const NnUint TILE = 128u;
+
+
+    // 스레드마다 자기 헤드 묶음만 다루므로 thread_local 로 충분하다.
+    thread_local std::vector<float> scratch;   // 점수 -> 확률 타일
+    thread_local std::vector<float> stateM;    // running max
+    thread_local std::vector<float> stateL;    // running sum
+
+    for (NnUint h0Base = h0Begin; h0Base < h0Limit; h0Base += headStride) {
+        const NnUint nHeadsInGroup = (h0Base + headStride <= h0Limit)
+            ? headStride
+            : (h0Limit - h0Base);
+        const NnUint headIndex = h0Base / kvMul;
+        const float *hKc = &keyCache[headIndex * headDim];
+        const float *hVc = &valueCache[headIndex * headDim];
+
+        // 쿼리도 타일링한다 (FlashAttention 의 바깥 루프).
+        //
+        // t 가 바깥 루프라 매 t 마다 배치 전체의 쿼리/누적기/스크래치를 다시 훑는다.
+        // 그 워킹셋은 B 에 비례하므로(헤드 그룹당 약 B x 6 kB) B 가 커지면 코어당
+        // L2 512 kB 를 넘어 매 t 가 DRAM 왕복이 된다. KV 만 타일링해서는 사라지지
+        // 않는다 — B=112 에서 att 실체화를 없앴는데도 9,340 -> 9,338 ms 로 무변화였다.
+        // BR 개씩 끊으면 워킹셋이 B 와 무관해진다.
+        const NnUint BR = 32u;
+        for (NnUint bBase = 0; bBase < batchSize; bBase += BR) {
+        const NnUint bCount = std::min(BR, batchSize - bBase);
+
+        // 이 타일에서 참조해야 하는 가장 먼 위치. 타일별로 잡으면 causal 상한이
+        // 좁아져 뒤쪽 타일이 앞쪽 타일의 위치까지 훑는 낭비가 없다.
+        NnUint maxPos = 0u;
+        for (NnUint b = 0; b < bCount; b++) {
+            const NnUint p = (NnUint)positions[bBase + b];
+            if (p > maxPos)
+                maxPos = p;
+        }
+
+        const NnUint nSlots = bCount * nHeadsInGroup;
+        if (scratch.size() < (std::size_t)nSlots * TILE)
+            scratch.resize((std::size_t)nSlots * TILE);
+        stateM.assign(nSlots, -std::numeric_limits<float>::infinity());
+        stateL.assign(nSlots, 0.0f);
+
+        for (NnUint j = 0; j < nHeadsInGroup; j++) {
+            for (NnUint b = 0; b < bCount; b++)
+                std::memset(&((float *)outputs[bBase + b])[(h0Base + j) * headDim], 0, headDim * sizeof(float));
+        }
+
+        for (NnUint t0 = 0; t0 <= maxPos; t0 += TILE) {
+            const NnUint t1 = std::min(t0 + TILE, maxPos + 1u);
+
+            // (1) 점수. t 를 바깥에 두어 K 의 한 위치를 배치 전체가 재사용한다.
+            for (NnUint t = t0; t < t1; t++) {
+                const float *posK = &hKc[t * kvDim0];
+                for (NnUint j = 0; j < nHeadsInGroup; j++) {
+                    const NnUint h0 = h0Base + j;
+                    for (NnUint b = 0; b < bCount; b++) {
+                        const NnUint qPos = (NnUint)positions[bBase + b];
+                        if (t > qPos)
+                            continue;                       // causal mask
+                        if (!blockMaskAllows(qPos, t))
+                            continue;                       // 블록 병렬 마스크
+                        const float *hQ = &query[(bBase + b) * qSliceD0 + h0 * headDim];
+                        scratch[(std::size_t)(j * bCount + b) * TILE + (t - t0)] =
+                            dotProduct_F32(hQ, posK, headDim) / headDimRoot;
+                    }
+                }
+            }
+
+            // (2) 온라인 소프트맥스 갱신. 이 타일에서 (b,h) 별 max/sum 을 합치고
+            //     이전 누적분 o 를 alpha 로 재스케일한다.
+            for (NnUint j = 0; j < nHeadsInGroup; j++) {
+                const NnUint h0 = h0Base + j;
+                for (NnUint b = 0; b < bCount; b++) {
+                    const NnUint slot = j * bCount + b;
+                    float *tile = &scratch[(std::size_t)slot * TILE];
+                    const NnUint qPos = (NnUint)positions[bBase + b];
+
+                    if (t0 > qPos) {
+                        // 이 타일 전체가 미래다. (3)이 스크래치를 읽으므로 0 으로 지운다.
+                        std::memset(tile, 0, (t1 - t0) * sizeof(float));
+                        continue;
+                    }
+
+                    float tileMax = -std::numeric_limits<float>::infinity();
+                    for (NnUint t = t0; t < t1; t++) {
+                        if (t > qPos || !blockMaskAllows(qPos, t))
+                            continue;
+                        const float v = tile[t - t0];
+                        if (v > tileMax)
+                            tileMax = v;
+                    }
+                    if (tileMax == -std::numeric_limits<float>::infinity()) {
+                        std::memset(tile, 0, (t1 - t0) * sizeof(float));
+                        continue;                            // 전부 마스크된 타일
+                    }
+
+                    const float mOld = stateM[slot];
+                    const float mNew = (mOld > tileMax) ? mOld : tileMax;
+                    const float alpha = (mOld == -std::numeric_limits<float>::infinity())
+                        ? 0.0f
+                        : expf(mOld - mNew);
+
+                    if (alpha != 1.0f) {
+                        stateL[slot] *= alpha;
+                        float *hY = &((float *)outputs[bBase + b])[h0 * headDim];
+#if defined(__ARM_NEON)
+                        const float32x4_t va = vdupq_n_f32(alpha);
+                        NnUint i = 0;
+                        for (; i + 4 <= headDim; i += 4)
+                            vst1q_f32(&hY[i], vmulq_f32(vld1q_f32(&hY[i]), va));
+                        for (; i < headDim; i++)
+                            hY[i] *= alpha;
+#else
+                        for (NnUint i = 0; i < headDim; i++)
+                            hY[i] *= alpha;
+#endif
+                    }
+
+                    float sum = 0.0f;
+                    for (NnUint t = t0; t < t1; t++) {
+                        if (t > qPos || !blockMaskAllows(qPos, t)) {
+                            tile[t - t0] = 0.0f;
+                            continue;
+                        }
+                        const float p = expf(tile[t - t0] - mNew);
+                        tile[t - t0] = p;
+                        sum += p;
+                    }
+                    stateM[slot] = mNew;
+                    stateL[slot] += sum;
+                }
+            }
+
+            // (3) o += p * V. 여기서도 t 를 바깥에 두어 V 의 한 위치를 재사용한다.
+            for (NnUint t = t0; t < t1; t++) {
+                const float *posV = &hVc[t * kvDim0];
+                for (NnUint j = 0; j < nHeadsInGroup; j++) {
+                    const NnUint h0 = h0Base + j;
+                    for (NnUint b = 0; b < bCount; b++) {
+                        const float p = scratch[(std::size_t)(j * bCount + b) * TILE + (t - t0)];
+                        if (p == 0.0f)
+                            continue;
+                        float *hY = &((float *)outputs[bBase + b])[h0 * headDim];
+#if defined(__ARM_NEON)
+                        const float32x4_t va = vdupq_n_f32(p);
+                        NnUint i = 0;
+                        for (; i + 4 <= headDim; i += 4)
+                            vst1q_f32(&hY[i], vmlaq_f32(vld1q_f32(&hY[i]), va, vld1q_f32(&posV[i])));
+                        for (; i < headDim; i++)
+                            hY[i] += p * posV[i];
+#else
+                        for (NnUint i = 0; i < headDim; i++)
+                            hY[i] += p * posV[i];
+#endif
+                    }
+                }
+            }
+        }
+
+        // 정규화: 지금까지 o 는 분자만 누적돼 있다.
+        for (NnUint j = 0; j < nHeadsInGroup; j++) {
+            const NnUint h0 = h0Base + j;
+            for (NnUint b = 0; b < bCount; b++) {
+                const float l = stateL[j * bCount + b];
+                if (l <= 0.0f)
+                    continue;
+                const float inv = 1.0f / l;
+                float *hY = &((float *)outputs[bBase + b])[h0 * headDim];
+#if defined(__ARM_NEON)
+                const float32x4_t vi = vdupq_n_f32(inv);
+                NnUint i = 0;
+                for (; i + 4 <= headDim; i += 4)
+                    vst1q_f32(&hY[i], vmulq_f32(vld1q_f32(&hY[i]), vi));
+                for (; i < headDim; i++)
+                    hY[i] *= inv;
+#else
+                for (NnUint i = 0; i < headDim; i++)
+                    hY[i] *= inv;
+#endif
+            }
+        }
+        } // b-타일
+    }
+}
+
 static void mul_F32(float *y, const float *x, const float *m, const NnUint n, const NnUint nThreads, const NnUint threadIndex) {
     SPLIT_THREADS(start, end, n, nThreads, threadIndex);
     unsigned int i = start;
@@ -1306,6 +1547,14 @@ static void initMatmulArgmaxForward(NnCpuOpContext *context) {
 // 단일 추론 프로세스 기준의 전역 상태이며, 실행기 스레드들은 op 경계에서만
 // 동기화되므로 forward 중에는 값이 바뀌지 않는다.
 static std::atomic<bool> gDecodePhase{true};
+
+// prefill attention 을 온라인 소프트맥스 융합 커널로 처리할지.
+// 기존 커널과 A/B 비교가 가능해야 하므로 스위치로 둔다(--attn-fused 0/1).
+static std::atomic<bool> gAttnFused{true};
+
+void nnCpuOpsSetAttnFused(bool enabled) {
+    gAttnFused.store(enabled, std::memory_order_relaxed);
+}
 
 void nnCpuOpsSetDecodePhase(bool isDecodePhase) {
     gDecodePhase.store(isDecodePhase, std::memory_order_relaxed);
@@ -1758,6 +2007,18 @@ static void multiHeadAttForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnU
         for (NnUint b = 0; b < batchSize; b++)
             assert((NnUint)positions[b] < config->seqLen);
 #endif
+        if (gAttnFused.load(std::memory_order_relaxed)) {
+            // att 버퍼를 쓰지 않는다. 점수 스크래치가 seqLen 이 아니라 TILE 에 비례한다.
+            multiheadAttFused_F32(
+                context->output, query, config->qSliceD0,
+                keyCache, valueCache,
+                positions, batchSize,
+                config->nHeads, config->nHeads0,
+                config->nKvHeads, config->kvDim0, config->headDim,
+                config->seqLen,
+                nThreads, threadIndex);
+            return;
+        }
         multiheadAttBatch_F32(
             context->output, query, config->qSliceD0,
             att, keyCache, valueCache,

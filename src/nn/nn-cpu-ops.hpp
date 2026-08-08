@@ -53,6 +53,7 @@ typedef struct {
 
 // prefill/decode 단계를 op 계층에 알린다. NnExecutor::setDecodePhase 에서 호출된다.
 void nnCpuOpsSetDecodePhase(bool isDecodePhase);
+void nnCpuOpsSetAttnFused(bool enabled);
 bool nnCpuOpsIsDecodePhase();
 
 // 블록 병렬 시뮬레이션 (research/07 Phase A1).

@@ -95,6 +95,7 @@ public:
     bool prefillSpOnly;
     NnUint spPrefillThreshold;
     // 블록 병렬 시뮬레이션 (research/07 Phase A1). 0 이면 비활성.
+    bool attnFused;   // prefill attention 온라인 소프트맥스 융합 (기본 켜짐)
     NnUint simBlockSize;
     NnUint simAnchorLen;
     bool strictKvAffinity;
