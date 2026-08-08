@@ -11,7 +11,12 @@
 
 typedef struct {
     const char *name;
-    NnByte nBatches;
+    // NnByte(uint8_t) 였다. 이 구조체에서 NnByte 는 바이트 포인터용 타입인데
+    // 개수 필드에 잘못 쓰여, nBatches 가 256 에서 0 으로 돌았다:
+    //   --n-batches 448  -> 448 & 255 = 192  -> "Assertion failed: 448 != 192"
+    //   --n-batches 1024 -> 1024 & 255 = 0   -> "Assertion failed: 1024 != 0"
+    // 즉 prefill 청크 폭이 255 에서 조용히 무너지고 있었다.
+    NnUint nBatches;
     NnByte *bufferFlags;
     NnByte **buffers;
     NnBufferConfig *bufferConfigs;

@@ -145,8 +145,11 @@ static void inferenceContinuousBatching(AppInferenceContext *context) {
         : context->args->nBatches;
     if (maxActive < 1)
         throw std::runtime_error("decode-cb-max-active must be >= 1");
-    if (context->args->nBatches > MAX_CONTROL_BATCH_POS)
-        throw std::runtime_error("nBatches exceeds control packet batch position capacity");
+    // batchPositions[] 를 실제로 쓰는 건 명시 위치 모드(continuous batching)뿐이므로
+    // 상한은 nBatches 가 아니라 동시 활성 요청 수 maxActive 에 걸어야 한다.
+    // nBatches 에 걸면 배열을 쓰지도 않는 prefill 청크까지 묶인다.
+    if (maxActive > MAX_CONTROL_BATCH_POS)
+        throw std::runtime_error("decode-cb-max-active exceeds control packet batch position capacity");
 
     printf("📚 Continuous batching mode: prompts=%zu maxActive=%u\n", prompts.size(), maxActive);
 

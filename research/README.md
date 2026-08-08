@@ -8,7 +8,7 @@
 | 문서 | 내용 |
 |---|---|
 | **README.md** (이 문서) | 목표 · 문제 · 해결 · 선행연구 |
-| [06-baseline-status.md](06-baseline-status.md) | **baseline 종합** — 발견 #1~#5, 다중 노드 측정, 실행 절차 |
+| [06-baseline-status.md](06-baseline-status.md) | **baseline 종합** — 발견 #1~#6, 다중 노드 측정, 실행 절차 |
 | [09-design-ring-cp.md](09-design-ring-cp.md) | **제안 알고리즘 설계 (최종)** |
 | [07-design-block-parallel.md](07-design-block-parallel.md) | 근사 노선 — 기각됨. 측정·분석은 유효 |
 | [08-glossary.md](08-glossary.md) | 용어 (dense/공유기저/배리어 등) |
@@ -180,6 +180,46 @@ CPU 를 점유하지 않는다 (코어가 4개뿐인 SBC 에서 스핀은 연산
 
 > 이 수정으로 **TP2 가 처음으로 단일 노드를 앞섰다**(1.13×).
 > "분산이 단일보다 느리다"는 이전 결론은 알고리즘의 한계가 아니라 이 sleep 이었다.
+
+## 발견 #6 — 제어 패킷의 위치 배열이 prefill 청크 폭을 묶고 있었다
+
+`--n-batches` 를 32 → 112 로 올리면 `batchSize exceeds MAX_CONTROL_BATCH_POS` 로 즉사했다.
+
+**이 파라미터가 중요한 이유**: 청크마다 32레이어 FFN 가중치 3.2 GB 를 다시 읽으므로,
+청크 수가 곧 가중치 재스트리밍 양이다 (S=447 기준 **chunk32 44.4 GB vs chunk112 12.7 GB**).
+게다가 [Ring CP](09-design-ring-cp.md) 에서 이 값이 곧 **노드당 블록 크기 `B`** 다.
+
+**원인**: `MAX_CONTROL_BATCH_POS` 는 제어 패킷 `batchPositions[]` 의 배열 길이인데,
+그 배열은 **명시 위치 모드(decode continuous batching)에서만** 쓰인다.
+prefill 은 `positionMode == 0` 이라 위치를 `position + i` 로 재구성하므로 배열을 건드리지 않는다.
+그런데 검사가 모든 경로의 공통 진입점인 `setBatchSize()` 에 있어서,
+**배열을 쓰지도 않는 prefill 이 배열 길이에 묶여 있었다.**
+
+**수정**: 검사를 배열에 실제로 쓰는 `setBatchPositions()` 로 옮기고, decode 쪽 상한은
+`nBatches` 가 아니라 동시 활성 요청 수 `maxActive` 에 걸었다.
+
+**부수 발견 두 가지.**
+(1) `nn-cpu-ops.hpp` 의 `NnByte nBatches` — 개수 필드에 바이트 포인터용 타입이 쓰여
+청크 폭이 255 에서 조용히 0 으로 돌았다(`448 & 255 = 192`). `NnUint` 로 수정.
+(2) `Makefile` 이 헤더 의존성을 추적하지 않아, 헤더를 고치고 `make` 해도 rc=0 이면서
+아무것도 재컴파일되지 않았다. 옛 바이너리로 스윕을 돌려 측정 한 시간을 날렸다.
+`-MMD -MP` + `-include *.d` 로 수정(규칙의 `$^` → `$<` / `filter-out` 동반).
+
+**그런데 청크를 키워도 빨라지지 않는다 — 모델이 기각됐다.**
+
+| 청크 폭 | prefill | attn | ffn |
+|---|---|---|---|
+| **32** | **33,760** | **2,689** | 23,721 |
+| 112 | 39,137 | 9,340 | 22,702 |
+| 448 | 76,076 | 43,838 | 23,863 |
+
+FFN 은 거의 줄지 않고(재스트리밍 44.4 → 12.7 GB 인데 1초), attention 이 16배 폭발한다.
+중간 버퍼 `att`(`nBatches × nHeads × seqLen × 4B`)가 Pi5 의 L3 2 MB 를 벗어나기 때문이다.
+
+> **청크 폭의 상한은 메모리 용량이 아니라 캐시다.** `B_max ≈ L3 / (nHeads·seqLen·4)`
+> — seqLen 704 에서 ≈23, 4096 이면 ≈4. **긴 프롬프트일수록 천장이 낮다.**
+> 이 천장을 걷어내는 것이 **online softmax 융합**이고, 이제 그것은 선택지가 아니라
+> [Ring CP](09-design-ring-cp.md) 의 `B` 를 키우기 위한 전제 조건이다.
 
 ## 그 밖에 고친 것
 

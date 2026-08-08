@@ -132,7 +132,13 @@ public:
 };
 
 #define MAX_SP_GROUPS 8
-#define MAX_CONTROL_BATCH_POS 64
+// 제어 패킷이 담을 수 있는 배치 위치 수 = prefill 청크 크기(nBatches)의 상한.
+//
+// 64 였을 때 --n-batches 112 이상이 "batchSize exceeds MAX_CONTROL_BATCH_POS" 로 죽었다.
+// nBatches 는 청크마다 32레이어 FFN 가중치 3.2 GB 를 재스트리밍하는 횟수를 결정하고
+// (S=447 기준 chunk32 44.4GB vs chunk112 12.7GB), Ring CP 에서는 노드당 블록 크기가 된다.
+// 512 로 올려도 패킷은 648 -> 2440 B 로, 청크당 1회 전송이라 무시할 수준이다.
+#define MAX_CONTROL_BATCH_POS 512
 #define MAX_STAGE_SKIP_LOG_PREFIX 256
 
 typedef struct {

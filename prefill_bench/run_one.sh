@@ -26,6 +26,16 @@ TOKENIZER="${TOKENIZER:-/home/ubuntu/prefill-opt/dllama_tokenizer_llama3.t}"
 NTHREADS="${NTHREADS:-4}"
 MIN_AVAIL_MB="${MIN_AVAIL_MB:-8000}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-3600}"
+# 반복 측정 + 워밍업.
+#
+# 5회 측정 결과 첫 실행만 일관되게 이상치였다:
+#   rep1 49,992 / rep2 34,077 / rep3 34,824 / rep4 34,418 / rep5 32,414 ms
+# 시작 온도는 rep1 이 오히려 평범했으므로(60.6 vs 59.0) 열이 아니라 콜드 스타트다
+# — 첫 실행이 6.32 GB 모델을 SD 에서 읽으며 페이지 캐시/메모리 상태를 바꾼다.
+# rep1 을 버리면 편차가 51% -> 7% 로 떨어진다.
+REPEATS="${REPEATS:-3}"      # 워밍업 제외한 측정 횟수
+WARMUP="${WARMUP:-1}"
+COOLDOWN="${COOLDOWN:-45}"
 
 mkdir -p "$OUT_DIR/logs"
 LOG="$OUT_DIR/logs/$TAG.log"
@@ -83,21 +93,55 @@ MAX_LOG_MB="${MAX_LOG_MB:-200}"
 LOG_GUARD_PID=$!
 trap 'kill $LOG_GUARD_PID 2>/dev/null' EXIT
 
-set +e
-timeout "$RUN_TIMEOUT" "$BIN" inference \
-    --model "$MODEL" --tokenizer "$TOKENIZER" \
-    --nthreads "$NTHREADS" --buffer-float-type q80 \
-    --max-seq-len "$MAX_SEQ" --steps "$STEPS" \
-    --seed 42 --temperature 0 \
-    --wall-metrics 1 --stage-timing 1 \
-    --prompt "$(cat "$PROMPT_FILE")" \
-    "$@" > "$LOG" 2>&1
-RC=$?
-set -e
+# 시작 전 온도 기록 (열 상태가 편차의 주원인이다)
+read_temp() {
+    if [ -r /sys/class/thermal/thermal_zone0/temp ]; then
+        awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp
+    else
+        echo "NA"
+    fi
+}
 
-if [ $RC -ne 0 ]; then
-    echo "   [실패] rc=$RC  (137/143 이면 OOM/kill)"
-    tail -3 "$LOG" | sed 's/^/     /'
-    exit $RC
-fi
-echo "   $(grep -m1 'prefillMs' "$LOG")  $(grep -m1 'ffnMs' "$LOG")"
+vals=""
+TOTAL=$(( WARMUP + REPEATS ))
+for rep in $(seq 1 "$TOTAL"); do
+    replog="$OUT_DIR/logs/${TAG}_r${rep}.log"
+    t0=$(read_temp)
+    set +e
+    timeout "$RUN_TIMEOUT" "$BIN" inference \
+        --model "$MODEL" --tokenizer "$TOKENIZER" \
+        --nthreads "$NTHREADS" --buffer-float-type q80 \
+        --max-seq-len "$MAX_SEQ" --steps "$STEPS" \
+        --seed 42 --temperature 0 \
+        --wall-metrics 1 --stage-timing 1 \
+        --prompt "$(cat "$PROMPT_FILE")" \
+        "$@" > "$replog" 2>&1
+    RC=$?
+    set -e
+    t1=$(read_temp)
+
+    if [ $RC -ne 0 ]; then
+        echo "   [실패] rep=$rep rc=$RC  (137/143 이면 OOM/kill)"
+        tail -3 "$replog" | sed 's/^/     /'
+        exit $RC
+    fi
+    pf=$(grep -m1 'prefillMs' "$replog" | awk '{print $2}')
+    if [ "$rep" -le "$WARMUP" ]; then
+        printf '   warmup prefill=%-10s temp %s->%s  (측정에서 제외)\n' "$pf" "$t0" "$t1"
+    else
+        printf '   rep%-2s  prefill=%-10s temp %s->%s\n' "$(( rep - WARMUP ))" "$pf" "$t0" "$t1"
+        vals="$vals $pf"
+    fi
+    [ "$rep" -lt "$TOTAL" ] && sleep "$COOLDOWN"
+done
+
+# 중앙값을 대표값으로, 마지막 실행 로그를 $LOG 로 남긴다
+cp "$OUT_DIR/logs/${TAG}_r${TOTAL}.log" "$LOG"
+echo "$vals" | tr ' ' '\n' | grep -v '^$' | sort -n > "$OUT_DIR/logs/${TAG}.vals"
+med=$(awk '{a[NR]=$1} END{ if(NR%2) print a[(NR+1)/2]; else printf "%.2f",(a[NR/2]+a[NR/2+1])/2 }' \
+      "$OUT_DIR/logs/${TAG}.vals")
+mn=$(head -1 "$OUT_DIR/logs/${TAG}.vals"); mx=$(tail -1 "$OUT_DIR/logs/${TAG}.vals")
+spread=$(awk -v a="$mn" -v b="$mx" -v m="$med" 'BEGIN{ if(m>0) printf "%.0f", (b-a)/m*100; else print 0 }')
+printf '   => 중앙값 %s ms  (범위 %s~%s, 편차 %s%%)\n' "$med" "$mn" "$mx" "$spread"
+[ "$spread" -gt 15 ] && echo "   ⚠️  편차 ${spread}% — 배수 비교에 쓰기 전 쿨다운을 늘리거나 반복을 키울 것"
+echo "$med" > "$OUT_DIR/logs/${TAG}.median"

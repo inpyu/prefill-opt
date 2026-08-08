@@ -594,6 +594,16 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             args.spPrefillOnly = args.prefillSpOnly;
         } else if (std::strcmp(name, "--sp-prefill-threshold") == 0) {
             args.spPrefillThreshold = (unsigned int)atoi(value);
+        } else if (std::strcmp(name, "--n-batches") == 0) {
+            // prefill 청크 크기(= 그래프의 배치 폭). 기본 32.
+            // 청크마다 32레이어 FFN 가중치 3.2 GB 를 다시 읽으므로, 이 값이 크면
+            // 가중치 재스트리밍이 줄어든다(S=447 기준 chunk32 44.4GB vs chunk112 12.7GB).
+            // Ring CP 에서는 이 값이 곧 노드당 블록 크기가 된다.
+            // 대가: xPipe/att/logits 버퍼가 이 값에 비례해 커진다
+            // (logits 가 가장 크다: nBatches x vocab x 4B).
+            // "auto" 면 0 을 sentinel 로 두고, 헤더/프롬프트/가용메모리를 아는
+            // 그래프 생성 시점(resolveAutoNBatches)에서 확정한다.
+            args.nBatches = (std::strcmp(value, "auto") == 0) ? 0u : (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--sim-block-size") == 0) {
             args.simBlockSize = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--sim-anchor-len") == 0) {
@@ -871,8 +881,13 @@ bool RootLlmInference::getDecodeRecvWaitStats(float *p50Ms, float *p95Ms) const 
 }
 
 void RootLlmInference::setBatchSize(NnUint batchSize) {
-    if (batchSize > MAX_CONTROL_BATCH_POS)
-        throw std::runtime_error("batchSize exceeds MAX_CONTROL_BATCH_POS");
+    // MAX_CONTROL_BATCH_POS 는 controlPacket.batchPositions[] 의 길이이고,
+    // 그 배열은 positionMode == 1 (setBatchPositions, decode continuous batching)
+    // 에서만 쓰인다. prefill 은 setPosition() -> positionMode == 0 이라 위치를
+    // position+i 로 재구성하므로 배열을 건드리지 않는다.
+    // 여기서 검사하면 배열을 쓰지도 않는 prefill 청크가 배열 길이에 묶인다
+    // (--n-batches 112 가 "batchSize exceeds MAX_CONTROL_BATCH_POS" 로 죽던 원인).
+    // 검사는 배열에 실제로 쓰는 setBatchPositions() 에만 둔다.
     execution->setBatchSize(batchSize);
     controlPacket.batchSize = batchSize;
 }
@@ -1758,6 +1773,75 @@ void WorkerLlmInference::afterForward() {
     }
 }
 
+
+// --n-batches auto 해석.
+//
+// nBatches 는 prefill 청크 폭이다. 크게 잡을수록 청크 수가 줄어 32레이어 FFN
+// 가중치(3.2 GB) 재스트리밍이 줄지만, 그래프 버퍼가 이 값에 선형으로 커진다.
+// 따라서 고정 상수가 아니라 (프롬프트 길이, 가용 메모리)의 함수여야 한다.
+//
+// 상한 두 개 중 작은 쪽을 취한다:
+//   (a) 프롬프트 길이  — 청크가 프롬프트보다 커봐야 버퍼만 낭비된다.
+//   (b) 메모리 예산    — 배치당 버퍼 바이트로 나눈 값. 여기서 보수적으로 잡는 이유는
+//                        OOM 이 이 프로젝트에서 반복해서 실측을 날려먹었기 때문이다.
+static NnUint resolveAutoNBatches(AppCliArgs *args, const LlmHeader *header) {
+    if (args->nBatches > 0)
+        return args->nBatches; // 명시값은 그대로 존중한다
+
+    // prefill 청크 폭을 정한다.
+    //
+    // 처음에는 "청크가 클수록 FFN 가중치 재스트리밍이 줄어 빨라진다"고 보고
+    // 가용 메모리로 상한을 잡았다. 실측으로 기각됐다 (S=448, seqLen=704, 4스레드):
+    //
+    //     B     prefill    attn      ffn     청크수
+    //     8      63,023    2,537   46,636      56
+    //     16     32,610    2,524   23,232      28
+    //     24     43,270    2,520   32,762      19
+    //     32     32,564    2,548   22,879      14   <- 최적
+    //     48     35,327    2,755   25,288      10
+    //     64     37,224    3,622   28,189       7   (편차 16%, 신뢰도 낮음)
+    //     112    39,137    9,340   22,702       4
+    //     448    76,076   43,838   23,863       1
+    //
+    // 읽는 법:
+    //  - FFN 은 청크를 키워도 줄지 않는다. 14 -> 4 청크로 재스트리밍을 44.4 -> 12.7 GB
+    //    로 낮췄는데 23,721 -> 22,702 ms, 1초뿐이다. GEMM 이 이미 32행에서 compute-bound 다.
+    //  - 대신 attention 이 폭발한다. 중간 버퍼 att = (B x nHeads x seqLen x 4B) 가
+    //    Pi5 의 L3 2 MB 를 벗어나면 매 청크가 통째로 DRAM 왕복이 된다.
+    //  - B 가 16 의 배수가 아니면 FFN 이 크게 나빠진다(8 -> 2.04x, 24 -> 1.43x).
+    //    메커니즘은 아직 규명하지 못했다. SPLIT_THREADS 는 나머지를 분배하므로
+    //    단순 스레드 불균형은 아니고, 48 이 1.10x 인 것도 16배수 패딩 모델로는 설명이 안 된다.
+    //
+    // 그래서 메모리가 아니라 캐시와 실측 창(16~32)으로 정한다.
+    const NnUint kGranularity = 16u;  // 이 배수를 벗어나면 FFN 이 나빠진다(위 표)
+    const NnUint kMinBatches = 16u;
+    const NnUint kMaxBatches = 32u;   // 그 위는 attention 이 커지기만 한다
+
+    // 캐시 상한: att 버퍼가 L3 안에 들어오는 B.
+    // seqLen 이 길수록 낮아진다 — 704 에서 약 23, 4096 이면 약 4 다.
+    // 즉 긴 프롬프트일수록 천장이 낮고, 그것을 걷어내려면 online softmax 융합으로
+    // att 를 실체화하지 않아야 한다(research/09 의 B 를 키우기 위한 전제 조건).
+    const size_t kL3Bytes = 2u * 1024u * 1024u;
+    const size_t attPerBatch = (size_t)header->nHeads * header->seqLen * 4u;
+    NnUint cacheCap = (NnUint)std::max<size_t>(1u, kL3Bytes / std::max<size_t>(1u, attPerBatch));
+
+    // 프롬프트보다 넓은 청크는 버퍼만 낭비한다. 토큰 수는 아직 모르므로 문자 수로 근사한다.
+    NnUint promptCap = args->prompt != nullptr
+        ? (NnUint)std::max<size_t>(1u, std::strlen(args->prompt) / 2u)
+        : kMaxBatches;
+
+    NnUint n = std::min(cacheCap, promptCap);
+    n = (n / kGranularity) * kGranularity;                       // 16 의 배수로 내림
+    n = std::max(kMinBatches, std::min(kMaxBatches, n));
+    printf("🧮 nBatches auto = %u (cacheCap %u, promptCap %u, att %zu KB/batch)\n",
+        n, cacheCap, promptCap, attPerBatch / 1024u);
+    // 확정값을 되쓴다. resolvePrefillChunkBatchSize / prefillBatchCap / 정보 출력 등
+    // 그래프 생성 이후 경로가 모두 args->nBatches 를 다시 읽으므로, sentinel 0 이
+    // 남아 있으면 청크 폭이 1 로 무너진다.
+    args->nBatches = n;
+    return n;
+}
+
 void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *context)) {
     NnUint nNodes = args->nWorkers + 1;
 
@@ -1821,7 +1905,8 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
 
     Sampler sampler(tokenizer.vocabSize, args->temperature, args->topp, args->seed);
 
-    LlmNet net = buildLlmNet(&header, topology, args->nBatches, nullptr, decodeLogitsMode == 1u);
+    const NnUint resolvedNBatches = resolveAutoNBatches(args, &header);
+    LlmNet net = buildLlmNet(&header, topology, resolvedNBatches, nullptr, decodeLogitsMode == 1u);
     std::unique_ptr<LlmNet, void(*)(LlmNet *)> netPtr(&net, releaseLlmNet);
 
     NnNodeConfig *rootNodeConfig = &net.nodeConfigs[0];
