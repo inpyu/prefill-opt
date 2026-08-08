@@ -450,7 +450,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.spPrefillOnly = true;
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
-    args.attnFused = true;
+    args.attnFused = -1; // auto
     args.simBlockSize = 0;
     args.simAnchorLen = 0;
     // Default relaxed policy:
@@ -606,8 +606,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             // 그래프 생성 시점(resolveAutoNBatches)에서 확정한다.
             args.nBatches = (std::strcmp(value, "auto") == 0) ? 0u : (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--attn-fused") == 0) {
-            // 0 이면 att 를 통째로 실체화하는 기존 커널로 되돌린다(A/B 비교용).
-            args.attnFused = atoi(value) == 1;
+            // auto | 0 | 1. 0 이면 att 를 통째로 실체화하는 기존 커널(A/B 비교용).
+            args.attnFused = (std::strcmp(value, "auto") == 0) ? -1 : (atoi(value) == 1 ? 1 : 0);
         } else if (std::strcmp(name, "--sim-block-size") == 0) {
             args.simBlockSize = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--sim-anchor-len") == 0) {
@@ -2041,9 +2041,20 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
     }
 
     // 블록 병렬 시뮬레이션 (research/07 Phase A1). prefill attention 마스크만 바꾼다.
+    // 융합 커널은 B 가 클 때만 이득이다.
+    //
+    //   B      기존 attn   융합 attn
+    //   32       2,393       2,585    <- 손해 (쿼리 타일 BR=32 라 타일링이 무의미)
+    //   112      9,340       2,664
+    //   448     43,838       2,731
+    //
+    // 실제 판단은 커널이 호출 시점의 batchSize 로 한다(attnFusedFor).
+    // 여기서는 CLI 의 -1/0/1 을 그대로 넘긴다.
     nnCpuOpsSetAttnFused(args->attnFused);
-    if (!args->attnFused)
+    if (args->attnFused == 0)
         printf("🔀 attention: 기존 커널(att 전체 실체화)\n");
+    else if (args->attnFused == 1)
+        printf("🔀 attention: 융합 커널 강제\n");
 
     if (args->simBlockSize > 0) {
         printf("🧱 블록 병렬 시뮬레이션: blockSize=%u anchorLen=%u\n",
@@ -2085,6 +2096,9 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
 
 void runWorkerApp(AppCliArgs *args) {
     printf("📦 ControlPacket size: %zu bytes\n", sizeof(LlmControlPacket));
+    // 워커는 root 의 CLI 를 받지 않는다. 기본값 auto 는 커널이 batchSize 로 판단하므로
+    // root 와 저절로 일치하지만, A/B 로 강제할 때는 워커에도 같은 값을 줘야 한다.
+    nnCpuOpsSetAttnFused(args->attnFused);
     while (true) {
         try {
             std::unique_ptr<NnNetwork> networkPtr = NnNetwork::serve(args->port);

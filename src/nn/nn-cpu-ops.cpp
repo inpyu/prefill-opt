@@ -1549,11 +1549,25 @@ static void initMatmulArgmaxForward(NnCpuOpContext *context) {
 static std::atomic<bool> gDecodePhase{true};
 
 // prefill attention 을 온라인 소프트맥스 융합 커널로 처리할지.
-// 기존 커널과 A/B 비교가 가능해야 하므로 스위치로 둔다(--attn-fused 0/1).
-static std::atomic<bool> gAttnFused{true};
+// -1 = auto(배치 폭으로 판단), 0 = 끔, 1 = 켬.
+//
+// 판단을 전역 플래그가 아니라 호출 시점의 batchSize 로 하는 이유:
+// 워커는 root 의 CLI 설정을 받지 않으므로 전역으로 두면 root 와 워커가 서로 다른
+// 커널을 돌게 된다. 실제 청크 폭으로 매번 정하면 전파 채널 없이 양쪽이 일치하고,
+// 마지막 짧은 청크에도 알아서 맞는다.
+static std::atomic<int> gAttnFusedMode{-1};
 
-void nnCpuOpsSetAttnFused(bool enabled) {
-    gAttnFused.store(enabled, std::memory_order_relaxed);
+void nnCpuOpsSetAttnFused(int mode) {
+    gAttnFusedMode.store(mode, std::memory_order_relaxed);
+}
+
+// 융합이 이득인 경계. 쿼리 타일 BR=32 이므로 그 이하에서는 타일 루프가 한 번만
+// 돌아 재스케일 패스만 늘어난다 (실측 B=32 에서 2,393 -> 2,585 ms 로 손해).
+static inline bool attnFusedFor(NnUint batchSize) {
+    const int mode = gAttnFusedMode.load(std::memory_order_relaxed);
+    if (mode >= 0)
+        return mode == 1;
+    return batchSize > 32u;
 }
 
 void nnCpuOpsSetDecodePhase(bool isDecodePhase) {
@@ -2007,7 +2021,7 @@ static void multiHeadAttForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnU
         for (NnUint b = 0; b < batchSize; b++)
             assert((NnUint)positions[b] < config->seqLen);
 #endif
-        if (gAttnFused.load(std::memory_order_relaxed)) {
+        if (attnFusedFor(batchSize)) {
             // att 버퍼를 쓰지 않는다. 점수 스크래치가 seqLen 이 아니라 TILE 에 비례한다.
             multiheadAttFused_F32(
                 context->output, query, config->qSliceD0,
