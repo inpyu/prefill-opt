@@ -450,6 +450,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.spPrefillOnly = true;
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
+    args.cpSplit = false;
     args.pplBatch = 1;
     args.attnFused = -1; // auto
     args.simBlockSize = 0;
@@ -606,6 +607,10 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             // "auto" 면 0 을 sentinel 로 두고, 헤더/프롬프트/가용메모리를 아는
             // 그래프 생성 시점(resolveAutoNBatches)에서 확정한다.
             args.nBatches = (std::strcmp(value, "auto") == 0) ? 0u : (unsigned int)atoi(value);
+        } else if (std::strcmp(name, "--cp-split") == 0) {
+            // spSize=N 토폴로지에서 각 노드가 배치의 자기 블록 행만 계산하게 한다.
+            // 기본은 꺼둔다 — 켜면 SP 의 기존 의미(전 노드가 전체 배치 계산)가 바뀐다.
+            args.cpSplit = atoi(value) == 1;
         } else if (std::strcmp(name, "--ppl-batch") == 0) {
             args.pplBatch = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--attn-fused") == 0) {
@@ -2053,6 +2058,11 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
     //
     // 실제 판단은 커널이 호출 시점의 batchSize 로 한다(attnFusedFor).
     // 여기서는 CLI 의 -1/0/1 을 그대로 넘긴다.
+    if (args->cpSplit) {
+        const NnNodePlacement pl = topology.getPlacement(0);
+        nnCpuOpsSetCpRange(topology.spSize, pl.spRank);
+        printf("🔗 CP 분할: spSize=%u rank=%u (root 는 마지막 블록)\n", topology.spSize, pl.spRank);
+    }
     nnCpuOpsSetAttnFused(args->attnFused);
     if (args->attnFused == 0)
         printf("🔀 attention: 기존 커널(att 전체 실체화)\n");
@@ -2114,6 +2124,19 @@ void runWorkerApp(AppCliArgs *args) {
             std::unique_ptr<NnNodeConfig, void(*)(NnNodeConfig *)> nodeConfigPtr(&nodeConfig, releaseNodeConfig);
 
             printNodeRequiredMemory(&netConfig, &nodeConfig);
+
+            // Ring CP: 워커는 root 의 CLI 를 받지 않으므로 자기 rank 를 config 에서 읽는다.
+            // netConfig.spSize 와 nodeConfig.spRank 는 root 가 보낸 값이라 root 와 항상 일치한다.
+            if (args->cpSplit) {
+                // spSize 는 NnNetConfig 에 없다. nodeConfig 의 그룹 경계에서 유도한다:
+                //   SP 그룹 크기 = spSize * tpSize 이므로 tpSize 로 나눈다.
+                const NnUint tpSizeLocal = nodeConfig.tpGroupEnd - nodeConfig.tpGroupStart;
+                const NnUint spSizeLocal = tpSizeLocal > 0u
+                    ? (nodeConfig.spGroupEnd - nodeConfig.spGroupStart) / tpSizeLocal
+                    : 1u;
+                nnCpuOpsSetCpRange(spSizeLocal, nodeConfig.spRank);
+                printf("🔗 CP 분할: spSize=%u rank=%u\n", spSizeLocal, nodeConfig.spRank);
+            }
 
             NnNetExecution execution(args->nThreads, &netConfig);
 

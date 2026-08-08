@@ -824,6 +824,48 @@ void nnCpuOpsSetBlockMask(NnUint blockSize, NnUint anchorLen) {
 // 블록 병렬에서 각 노드는 자기 블록만 갖고 있으므로, 쿼리는
 //   [0, anchorLen)  ∪  [자기 블록 시작, q]
 // 만 참조할 수 있다. 그 밖은 다른 노드에 있어 보이지 않는다.
+// ---------------------------------------------------------------------------
+// Ring CP: 노드별 토큰 행 윈도우
+//
+// spSize=N 토폴로지는 이미 tpSize=1(전체 가중치 복제)이고 KV 를 시퀀스 축으로
+// 샤딩한다. 그러나 **연산은 나누지 않는다** — 모든 노드가 배치 전체를 계산하고
+// 자기 구간에만 KV 를 쓴 뒤 allgather 한다. 그래서 SP4 가 단일보다 느렸다.
+//
+// 여기서는 노드 i 가 배치의 자기 블록 행만 계산하게 한다. gemm 이 prefill 의 89%
+// 이고 토큰이 균등하므로 1/N 로 떨어진다.
+//
+// 창 밖 행을 계산하는 op 가 남아 있어도 정확성은 깨지지 않는다 — 창 밖 출력은
+// 아무도 읽지 않는다. 단 두 가지는 반드시 창을 지켜야 한다:
+//   - KV shift: 창 밖 행을 쓰면 allgather 로 다른 노드에 오염이 퍼진다.
+//   - lm_head: 마지막 행이 있어야 한다.
+//
+// 그래서 **root(rank 0)에게 마지막 블록**을 준다. root 가 로짓을 읽고 샘플링하므로
+// 마지막 토큰이 root 에 있으면 로짓 회수 경로를 새로 만들 필요가 없다.
+// 덤으로 attention 이 가장 무거운 블록이 16GB 머신인 root 에 간다.
+static std::atomic<NnUint> gCpSize{1u};
+static std::atomic<NnUint> gCpRank{0u};
+
+void nnCpuOpsSetCpRange(NnUint cpSize, NnUint cpRank) {
+    gCpSize.store(cpSize, std::memory_order_relaxed);
+    gCpRank.store(cpRank, std::memory_order_relaxed);
+}
+
+static inline void cpRowWindow(NnUint batchSize, NnUint *begin, NnUint *count) {
+    const NnUint n = gCpSize.load(std::memory_order_relaxed);
+    // batchSize < n 이면 나눌 것이 없다(decode 는 batchSize=1). 전체를 본다.
+    if (n <= 1u || batchSize < n) {
+        *begin = 0u;
+        *count = batchSize;
+        return;
+    }
+    const NnUint rank = gCpRank.load(std::memory_order_relaxed);
+    const NnUint blockIdx = (rank + n - 1u) % n;   // rank 0 -> 마지막 블록
+    const NnUint base = batchSize / n;
+    const NnUint rem = batchSize % n;              // 앞쪽 rem 개 블록이 1행씩 더
+    *begin = blockIdx * base + (blockIdx < rem ? blockIdx : rem);
+    *count = base + (blockIdx < rem ? 1u : 0u);
+}
+
 static inline bool blockMaskActive() {
     return gBlockSize.load(std::memory_order_relaxed) != 0u;
 }
@@ -878,9 +920,14 @@ static void multiheadAttBatch_F32(
         headStride = 1u;
     }
 
-    // 이 배치에서 참조해야 하는 가장 먼 위치
+    // CP: 이 노드가 맡은 쿼리 행만 계산한다.
+    NnUint winBegin, winCount;
+    cpRowWindow(batchSize, &winBegin, &winCount);
+    const NnUint winEnd = winBegin + winCount;
+
+    // 이 노드의 쿼리들이 참조해야 하는 가장 먼 위치
     NnUint maxPos = 0u;
-    for (NnUint b = 0; b < batchSize; b++) {
+    for (NnUint b = winBegin; b < winEnd; b++) {
         const NnUint p = (NnUint)positions[b];
         if (p > maxPos)
             maxPos = p;
@@ -899,7 +946,7 @@ static void multiheadAttBatch_F32(
             const float *posK = &hKc[t * kvDim0];
             for (NnUint j = 0; j < nHeadsInGroup; j++) {
                 const NnUint h0 = h0Base + j;
-                for (NnUint b = 0; b < batchSize; b++) {
+                for (NnUint b = winBegin; b < winEnd; b++) {
                     const NnUint qPos = (NnUint)positions[b];
                     if (t > qPos)
                         continue;             // causal mask
@@ -915,14 +962,14 @@ static void multiheadAttBatch_F32(
         // (2) softmax: (batch, head) 별로 자기 위치까지
         for (NnUint j = 0; j < nHeadsInGroup; j++) {
             const NnUint h0 = h0Base + j;
-            for (NnUint b = 0; b < batchSize; b++)
+            for (NnUint b = winBegin; b < winEnd; b++)
                 softmax_F32(&att[(b * nHeads0 + h0) * seqLen], (NnUint)positions[b] + 1u);
         }
 
         // (3) 출력 누적 전 0으로 초기화
         for (NnUint j = 0; j < nHeadsInGroup; j++) {
             const NnUint h0 = h0Base + j;
-            for (NnUint b = 0; b < batchSize; b++)
+            for (NnUint b = winBegin; b < winEnd; b++)
                 std::memset(&((float *)outputs[b])[h0 * headDim], 0, headDim * sizeof(float));
         }
 
@@ -931,7 +978,7 @@ static void multiheadAttBatch_F32(
             const float *posV = &hVc[t * kvDim0];
             for (NnUint j = 0; j < nHeadsInGroup; j++) {
                 const NnUint h0 = h0Base + j;
-                for (NnUint b = 0; b < batchSize; b++) {
+                for (NnUint b = winBegin; b < winEnd; b++) {
                     const NnUint qPos = (NnUint)positions[b];
                     if (t > qPos)
                         continue;
@@ -1036,8 +1083,12 @@ static void multiheadAttFused_F32(
         // 않는다 — B=112 에서 att 실체화를 없앴는데도 9,340 -> 9,338 ms 로 무변화였다.
         // BR 개씩 끊으면 워킹셋이 B 와 무관해진다.
         const NnUint BR = 32u;
-        for (NnUint bBase = 0; bBase < batchSize; bBase += BR) {
-        const NnUint bCount = std::min(BR, batchSize - bBase);
+        // CP: 이 노드가 맡은 쿼리 행만 계산한다.
+        NnUint winBegin, winCount;
+        cpRowWindow(batchSize, &winBegin, &winCount);
+        const NnUint winEnd = winBegin + winCount;
+        for (NnUint bBase = winBegin; bBase < winEnd; bBase += BR) {
+        const NnUint bCount = std::min(BR, winEnd - bBase);
 
         // 이 타일에서 참조해야 하는 가장 먼 위치. 타일별로 잡으면 causal 상한이
         // 좁아져 뒤쪽 타일이 앞쪽 타일의 위치까지 훑는 낭비가 없다.
@@ -1640,12 +1691,12 @@ bool nnCpuOpsIsDecodePhase() {
 static inline void lmHeadRowRange(const NnCpuOpContext *context, NnUint batchSize,
                                   NnUint *rowBegin, NnUint *rowCount) {
     if (context->isLmHead && batchSize > 1u && !nnCpuOpsIsDecodePhase()) {
+        // 마지막 행만. 그 행은 root 의 블록에 있다(cpRowWindow 참조).
         *rowBegin = batchSize - 1u;
         *rowCount = 1u;
-    } else {
-        *rowBegin = 0u;
-        *rowCount = batchSize;
+        return;
     }
+    cpRowWindow(batchSize, rowBegin, rowCount);
 }
 
 static bool matmulForward_llamafile(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
@@ -2263,7 +2314,10 @@ static void shiftForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint bat
     const NnSize dimBytes = getBytes(F_32, context->inputSize.x);
     NnByte *output = context->output[0];
 
-    for (NnUint batchIndex = 0; batchIndex < batchSize; batchIndex++) {
+    // CP: 자기 블록 행만 쓴다. 창 밖을 쓰면 allgather 로 오염이 퍼진다.
+    NnUint shBegin, shCount;
+    cpRowWindow(batchSize, &shBegin, &shCount);
+    for (NnUint batchIndex = shBegin; batchIndex < shBegin + shCount; batchIndex++) {
         const NnSize index = (NnSize)indexes[batchIndex];
         // SP write guard: only write if position is in this rank's local sequence range
         if (config->localSeqLen > 0) {
