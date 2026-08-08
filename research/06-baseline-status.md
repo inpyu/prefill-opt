@@ -561,18 +561,52 @@ SP 는 `tpSize=1` 이므로 워커가 `x` 를 영영 못 받는다. 실제로 �
 찍어보면 `maxabs=0` 이었다. 다만 이것만 고쳐도 출력은 여전히 깨진다 —
 **결함이 하나가 아니다.**
 
-### 남은 결론
+### 정정 — "`tpSize=1` 이라서"가 아니다
 
-`DLLAMA_SP_NOSHARD=1` 에서는 두 노드가 서로 데이터를 주고받지 않고 각자 전체를
-계산한다. 그런데도 root 의 출력이 틀린다. 즉 **문제는 SP 의미론이 아니라
-`tpSize=1` + `nNodes=2` 구성 자체**다. 이 코드베이스의 다중 노드 경로는 TP 를
-전제하고 있고, TP 가 아닌 2노드 구성은 검증된 적이 없다.
+한때 "문제는 `tpSize=1` + `nNodes=2` 구성 자체"라고 적었다. **틀렸다.**
+
+`--pp-size 2` 도 `tpSize = 2/(2·1) = 1` 인데 **게이트를 통과한다**
+(perplexity 편차 0.740 %, 앞 8토큰 일치). `tpSize=1` 은 무죄다.
+
+| 구성 | tpSize | 게이트 |
+|---|---|---|
+| TP2 | 2 | 통과 |
+| **PP2** | **1** | **통과** |
+| SP2 | 1 | 실패 |
+| SP2 + `NOSHARD` | 1 | 실패 |
+| SP2 + `KEEP_TP1_SYNCS` | 1 | 실패 |
+| SP2 + 둘 다 | 1 | 실패 |
+
+즉 **SP 고유의 문제**다. 샤딩을 없애고 tp1 sync 를 되살려도 깨진다.
+
+### SP 는 시퀀스 병렬 축이 아니다
+
+제어 패킷을 보면 SP 의 용도가 드러난다 ([app.hpp:169](../src/app.hpp)):
+
+```c
+// Per-SP-group overrides (used when spSize > 1 for concurrent P/D)
+// spGroups[i].batchSize == 0 means SP group i is idle
+struct { NnUint position; NnUint batchSize; } spGroups[MAX_SP_GROUPS];
+```
+
+워커는 `controlPacket.spGroups[mySpRank].batchSize > 0` 이면 자기 position/batchSize 를
+**따로** 잡는다 ([app.cpp:1262](../src/app.cpp)). 즉 SP 는 **여러 요청을 SP 그룹에
+나눠 동시에 prefill/decode 하기 위한 축**(P/D 분리)이지, 한 요청의 시퀀스를 쪼개는
+축이 아니다. `sliceKvCache` 의 시퀀스 샤딩과 `SYNC_SP_KV` allgather 는 그 위에
+얹힌 부분 구현으로 보이고, 단일 요청 경로로는 완성된 적이 없다.
+
+`--sp-size 2` 로 단일 요청을 돌린 것 자체가 **지원되지 않는 사용법**이었다.
+그래서 SP2/SP4 성능 수치는 폐기가 맞다.
 
 ### 다음
 
-CP 를 SP 축에 얹는 것을 포기하고 **별도 축**으로 만든다
+CP 를 SP 축에 얹지 않고 **별도 축**으로 만든다
 (`NnParallelTopology` 에 cpSize 추가 + 필요한 sync 를 명시적으로 정의).
-비용은 크지만, 검증된 적 없는 경로 위에 쌓지 않는다는 이점이 있다.
+
+> **PP2 가 통과한다는 사실이 중요하다.** `tpSize=1` 에서 전체 가중치 복제와
+> 다중 노드 배선이 정상 동작하는 경로가 존재한다는 뜻이므로, 새 CP 축은
+> SP 가 아니라 **PP 의 배선을 참고**해서 만들면 된다.
+
 `DLLAMA_SP_NOSHARD` 는 진단용으로 남겨둔다.
 
 > **교훈**: 새 기능을 기존 축 위에 올릴 때, 그 축이 **정확성 기준으로** 검증된 적이
