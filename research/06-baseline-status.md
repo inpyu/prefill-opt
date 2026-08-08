@@ -539,15 +539,41 @@ SP 는 **성능만 쟀고 정확성은 한 번도 확인하지 않았다**(SP2 4
 그 축이 `tpSize=1`(전체 가중치 복제)과 KV 시퀀스 샤딩을 공짜로 주기 때문이었다
 (§4.7 의 7-3 검증). **기반이 깨져 있으면 그 위에서 CP 를 디버깅해봐야 소용없다.**
 
+### 원인 좁히기 — 네 가지를 배제했다
+
+| 가설 | 실험 | 결과 |
+|---|---|---|
+| 프롬프트가 `--sp-prefill-threshold`(기본 256) 아래라서 | 447토큰으로 재실행 | **기각** — 그대로 `!` |
+| KV 샤딩 / allgather 결함 | `DLLAMA_SP_NOSHARD=1` 로 샤딩 제거<br>(두 노드가 각자 전체 KV 사용) | **기각** — 그대로 `!` |
+| `tpSize=1` 일 때 `SYNC_WITH_ROOT` 를 건너뛰어<br>워커가 임베딩 출력 `x` 를 못 받는 것 | `DLLAMA_KEEP_TP1_SYNCS=1` 로 sync 유지 | **기각** — 그대로 `!` |
+| 오늘 작업의 회귀 | `795cf5b` worktree 빌드 | **기각** — 사전 결함 |
+
+세 번째는 코드상 실재하는 결함이다 ([nn-network.cpp:1893](../src/nn/nn-network.cpp)):
+
+```c
+// With TP group size 1, root sync is typically a no-op broadcast path.
+if (shouldSkipTp1NoopSyncs()) {
+    if (declaredTpSize <= 1) continue;   // <- xPipe 브로드캐스트가 사라진다
+}
+```
+
+SP 는 `tpSize=1` 이므로 워커가 `x` 를 영영 못 받는다. 실제로 워커의 xPipe 행을
+찍어보면 `maxabs=0` 이었다. 다만 이것만 고쳐도 출력은 여전히 깨진다 —
+**결함이 하나가 아니다.**
+
+### 남은 결론
+
+`DLLAMA_SP_NOSHARD=1` 에서는 두 노드가 서로 데이터를 주고받지 않고 각자 전체를
+계산한다. 그런데도 root 의 출력이 틀린다. 즉 **문제는 SP 의미론이 아니라
+`tpSize=1` + `nNodes=2` 구성 자체**다. 이 코드베이스의 다중 노드 경로는 TP 를
+전제하고 있고, TP 가 아닌 2노드 구성은 검증된 적이 없다.
+
 ### 다음
 
-1. SP 가 특정 플래그 조합에서만 성립하는지 확인한다 — `spPrefillOnly`,
-   `strictKvAffinity`, `--sp-prefill-threshold` 등 SP 전용 스위치가 여럿 있고,
-   맨 `--sp-size 2` 가 지원되는 구성이 아닐 수 있다.
-2. 아니라면 SP allgather/샤딩 자체를 고친다.
-3. 그래도 안 되면 CP 를 SP 축에 얹지 말고 **별도 축**으로 만든다
-   (`NnParallelTopology` 에 cpSize 추가). 비용은 크지만 남의 버그 위에
-   쌓지 않는다는 이점이 있다.
+CP 를 SP 축에 얹는 것을 포기하고 **별도 축**으로 만든다
+(`NnParallelTopology` 에 cpSize 추가 + 필요한 sync 를 명시적으로 정의).
+비용은 크지만, 검증된 적 없는 경로 위에 쌓지 않는다는 이점이 있다.
+`DLLAMA_SP_NOSHARD` 는 진단용으로 남겨둔다.
 
 > **교훈**: 새 기능을 기존 축 위에 올릴 때, 그 축이 **정확성 기준으로** 검증된 적이
 > 있는지 먼저 확인한다. 성능 수치가 있다는 것은 동작한다는 뜻이 아니다.

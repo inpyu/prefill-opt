@@ -5,6 +5,7 @@
 #include "nn/nn-pipeline.hpp"
 #include "mmap.hpp"
 #include "llm.hpp"
+#include <cstdlib>
 #include <cerrno>
 #include <climits>
 #include <stdexcept>
@@ -238,7 +239,12 @@ LlmNet buildLlmNet(
 
     for (NnUint nodeIndex = 0; nodeIndex < nNodes; nodeIndex++) {
         NnNodePlacement nodePlacement = topology.getPlacement(nodeIndex);
-        NnKvCacheSlice kvCacheSlice = sliceKvCache(h->kvDim, h->seqLen, tpSize, topology.spSize, nodePlacement.spRank);
+        // 진단용: DLLAMA_SP_NOSHARD=1 이면 KV 를 샤딩하지 않는다(각 노드가 전체 KV 를 쓴다).
+    // spSize>1 에서 출력이 깨지는 원인이 샤딩/allgather 인지 가르기 위한 스위치다.
+    const bool spNoShard = std::getenv("DLLAMA_SP_NOSHARD") != nullptr;
+    NnKvCacheSlice kvCacheSlice = spNoShard
+        ? sliceKvCache(h->kvDim, h->seqLen, tpSize, 1u, 0u)
+        : sliceKvCache(h->kvDim, h->seqLen, tpSize, topology.spSize, nodePlacement.spRank);
         NnRopeSlice ropeSlice = sliceRope(h->ropeType, h->qDim, h->kvDim, h->nKvHeads, tpSize, h->seqLen, h->headDim, h->ropeTheta, nodePlacement.tpRank);
 
         // Calculate layer range for this PP stage
@@ -419,7 +425,7 @@ LlmNet buildLlmNet(
                 pointerRawConfig(SRC_BUFFER, vBufferIndex),
                 size0(),
                 NnShiftOpCodeConfig{n.positionPipeIndex, kvCacheSlice.localSeqStart, kvCacheSlice.localSeqLen});
-            if (topology.spSize > 1) {
+            if (topology.spSize > 1 && !spNoShard) {
                 att.addSpKvSync(n.positionPipeIndex, kBufferIndex, vBufferIndex,
                     kvCacheSlice.localSeqStart, kvCacheSlice.localSeqLen, kvCacheSlice.kvDim0);
             }
