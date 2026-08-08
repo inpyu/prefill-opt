@@ -1966,6 +1966,10 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
         // SYNC_SP_KV 의 수신 측이 peerStart = spRank * localSeqLen 으로 구간을
         // 계산하기 때문에 회전시키면 KV 에 구멍이 난다.
         if (syncConfig->syncType == SYNC_CP_LOGITS) {
+            static std::atomic<int> dbg{0};
+            if (dbg.fetch_add(1) < 3)
+                printf("[CP_LOGITS] node=%u thread=%u batchSize=%u\n",
+                    nodeConfig->nodeIndex, threadIndex, execution->batchSize);
             if (threadIndex != 0) continue;
             if (execution->batchSize <= 1u) continue;  // decode 는 모든 노드가 같은 값을 낸다
 
@@ -1987,7 +1991,19 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
             if (senderNode == rootNode)
                 continue;
 
+            static std::atomic<int> dbg2{0};
+            if (dbg2.fetch_add(1) < 3)
+                printf("[CP_LOGITS] node=%u mySpRank=%u sender=%u root=%u rowBytes=%zu\n",
+                    nodeConfig->nodeIndex, mySpRank, senderNode, rootNode, (size_t)rowBytes);
+            auto argmaxOf = [&](const NnByte *row) {
+                const float *f = (const float *)row;
+                const NnUint n = (NnUint)(rowBytes / sizeof(float));
+                NnUint best = 0; float bv = f[0];
+                for (NnUint i = 1; i < n; i++) if (f[i] > bv) { bv = f[i]; best = i; }
+                printf("[CP_LOGITS] node=%u argmax=%u val=%f\n", nodeConfig->nodeIndex, best, bv);
+            };
             if (mySpRank == senderSpRank) {
+                argmaxOf(lastRow);
                 const NnUint sock = getSocketIndexForNode(nodeConfig->nodeIndex, rootNode);
                 network->write(sock, lastRow, rowBytes);
                 network->addTaggedTraffic(false, rowBytes, 0);
@@ -1995,6 +2011,7 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
                 const NnUint sock = getSocketIndexForNode(nodeConfig->nodeIndex, senderNode);
                 network->read(sock, lastRow, rowBytes);
                 network->addTaggedTraffic(false, 0, rowBytes);
+                argmaxOf(lastRow);
             }
             continue;
         }
