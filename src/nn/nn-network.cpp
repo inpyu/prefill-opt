@@ -1553,6 +1553,77 @@ static void reduceSum(NnByte *result, const NnByte *input, NnSize nBytes, NnFloa
     }
 }
 
+
+// 배치 전체를 한 번에 교환하는 STAR allgather.
+//
+// 원래 sync 루프는 집합통신을 **배치 행마다** 호출했다(research/06 §4.11).
+// B=448 이면 allreduce 1회가 448번의 개별 왕복이 되고, 행 하나는 dim/tpSize x 4B
+// = 4 kB 뿐이라 페이로드는 무의미하고 고정 오버헤드만 448배로 붙는다.
+// 실측에서 syncWait 59초 / syncXfer 0.84초 — 대기가 전송의 70배였다.
+// decode 는 batchSize=1 이라 이 루프가 1회만 돌아 지금까지 드러나지 않았다.
+//
+// 여기서는 자기 슬라이스를 배치 전체에 대해 모아 한 번 보내고, 피어별로 한 번 받아
+// 되푼다. 패킹은 448x1024x4 = 1.8 MB memcpy 로 왕복 1회 오버헤드보다 싸다.
+// 왕복이 batchSize 배에서 1배가 된다.
+static void syncNodeSlicesBatched(bool onlyFromWorkerToRoot, NnNetwork *network,
+                                  NnUint nodeIndex, NnUint tpGroupStart, NnUint tpGroupEnd,
+                                  NnByte *pipe, NnSize rowBytes, NnUint batchSize,
+                                  NnUint nThreads, NnUint threadIndex) {
+    const NnUint nNodes = tpGroupEnd - tpGroupStart;
+    if (nNodes <= 1)
+        return;
+    const bool isWorker = nodeIndex != 0;
+    const NnUint nSockets = onlyFromWorkerToRoot && isWorker ? 1 : network->nSockets;
+    const NnUint nSocketsPerThread = nSockets / nThreads + (nSockets % nThreads > threadIndex ? 1 : 0);
+    if (nSocketsPerThread == 0)
+        return;
+
+    const NnSize sliceBytes = rowBytes / nNodes;
+    const NnUint localIndex = nodeIndex - tpGroupStart;
+    const NnSize packBytes = (NnSize)batchSize * sliceBytes;
+
+    thread_local std::vector<NnByte> sendBuf;
+    thread_local std::vector<NnByte> recvBuf;
+
+    std::vector<NnSocketIo> ios(nSocketsPerThread);
+
+    if (!onlyFromWorkerToRoot || isWorker) {
+        if (sendBuf.size() < packBytes)
+            sendBuf.resize(packBytes);
+        for (NnUint b = 0; b < batchSize; b++)
+            std::memcpy(&sendBuf[(NnSize)b * sliceBytes],
+                        &pipe[(NnSize)b * rowBytes + (NnSize)localIndex * sliceBytes],
+                        sliceBytes);
+        for (NnUint i = 0; i < nSocketsPerThread; i++) {
+            ios[i].socketIndex = threadIndex + i * nThreads;
+            ios[i].data = sendBuf.data();
+            ios[i].size = packBytes;
+        }
+        network->writeMany(nSocketsPerThread, &ios[0]);
+    }
+
+    if (!onlyFromWorkerToRoot || !isWorker) {
+        if (recvBuf.size() < packBytes * nSocketsPerThread)
+            recvBuf.resize(packBytes * nSocketsPerThread);
+        for (NnUint i = 0; i < nSocketsPerThread; i++) {
+            ios[i].socketIndex = threadIndex + i * nThreads;
+            ios[i].data = &recvBuf[(NnSize)i * packBytes];
+            ios[i].size = packBytes;
+        }
+        network->readMany(nSocketsPerThread, &ios[0]);
+
+        for (NnUint i = 0; i < nSocketsPerThread; i++) {
+            const NnUint socketIndex = threadIndex + i * nThreads;
+            // 소켓 인덱스는 자기 자신을 건너뛴 순서다(_alltoall 과 동일 규칙).
+            const NnUint sliceIndex = socketIndex >= localIndex ? socketIndex + 1 : socketIndex;
+            for (NnUint b = 0; b < batchSize; b++)
+                std::memcpy(&pipe[(NnSize)b * rowBytes + (NnSize)sliceIndex * sliceBytes],
+                            &recvBuf[(NnSize)i * packBytes + (NnSize)b * sliceBytes],
+                            sliceBytes);
+        }
+    }
+}
+
 static void syncNodeSlices_ringAllReduce(bool onlyFromWorkerToRoot,
                                          NnNetwork *network,
                                          NnUint nodeIndex,
@@ -1879,6 +1950,37 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
         NnByte *pipe = execution->pipes[syncConfig->pipeIndex];
         NnPipeConfig *pipeConfig = &netConfig->pipes[syncConfig->pipeIndex];
         NnSize batchBytes = getBytes(pipeConfig->size.floatType, pipeConfig->size.x);
+
+        // 배치 fast path: 행 단위 왕복을 배치 1회로 접는다 (research/06 §4.11).
+        // RING 경로는 배치화가 복잡해 STAR 로 처리한다 — 왕복 횟수가 batchSize 배에서
+        // 1배로 줄어드는 이득이 RING/STAR 차이보다 훨씬 크다.
+        if (execution->batchSize > 1u &&
+            (syncConfig->syncType == SYNC_NODE_SLICES ||
+             syncConfig->syncType == SYNC_NODE_SLICES_EXCEPT_ROOT)) {
+            NnUint declaredTpSize = 0;
+            if (nodeConfig->tpGroupEnd > nodeConfig->tpGroupStart)
+                declaredTpSize = nodeConfig->tpGroupEnd - nodeConfig->tpGroupStart;
+            if (shouldSkipTp1NoopSyncs() && declaredTpSize <= 1)
+                continue;
+
+            NnUint gStart = nodeConfig->tpGroupStart;
+            NnUint gEnd = nodeConfig->tpGroupEnd;
+            if (gEnd <= gStart || gEnd > netConfig->nNodes ||
+                nodeConfig->nodeIndex < gStart || nodeConfig->nodeIndex >= gEnd) {
+                gStart = 0;
+                gEnd = netConfig->nNodes;
+            }
+            auto t0 = std::chrono::high_resolution_clock::now();
+            syncNodeSlicesBatched(
+                syncConfig->syncType == SYNC_NODE_SLICES_EXCEPT_ROOT,
+                network, nodeConfig->nodeIndex, gStart, gEnd,
+                pipe, batchBytes, execution->batchSize, nThreads, threadIndex);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            if (network->isPerformanceMonitoringEnabled())
+                network->recordOperation("SYNC_NODE_SLICES_BATCHED", 0,
+                    batchBytes * execution->batchSize, t0, t1);
+            continue;
+        }
 
         for (NnUint batchIndex = 0; batchIndex < execution->batchSize; batchIndex++) {
             NnByte *pipeBatch = &pipe[batchIndex * batchBytes];
