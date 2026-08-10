@@ -1587,31 +1587,49 @@ static void syncNodeSlicesBatched(bool onlyFromWorkerToRoot, NnNetwork *network,
 
     std::vector<NnSocketIo> ios(nSocketsPerThread);
 
-    if (!onlyFromWorkerToRoot || isWorker) {
+    const bool doSend = !onlyFromWorkerToRoot || isWorker;
+    const bool doRecv = !onlyFromWorkerToRoot || !isWorker;
+
+    if (doSend) {
         if (sendBuf.size() < packBytes)
             sendBuf.resize(packBytes);
         for (NnUint b = 0; b < batchSize; b++)
             std::memcpy(&sendBuf[(NnSize)b * sliceBytes],
                         &pipe[(NnSize)b * rowBytes + (NnSize)localIndex * sliceBytes],
                         sliceBytes);
-        for (NnUint i = 0; i < nSocketsPerThread; i++) {
-            ios[i].socketIndex = threadIndex + i * nThreads;
-            ios[i].data = sendBuf.data();
-            ios[i].size = packBytes;
+    }
+    if (doRecv && recvBuf.size() < packBytes * nSocketsPerThread)
+        recvBuf.resize(packBytes * nSocketsPerThread);
+
+    // 쓰기와 읽기를 청크 단위로 **번갈아** 한다.
+    //
+    // 처음에는 전체를 한 번에 쓰고 한 번에 읽었다. 페이로드(배치 전체 슬라이스)가
+    // 소켓 버퍼를 넘으면 모든 노드가 쓰기에서 막히고 아무도 읽지 않아 **데드락**이
+    // 났다: "readMany stalled=58s pending=32768B sockets=3".
+    // 전 노드가 같은 루프를 lockstep 으로 돌고 청크가 버퍼 안에 들어가면 막히지 않는다.
+    // 왕복은 packBytes/CHUNK 회로, 행 단위(batchSize 회)보다 여전히 훨씬 적다.
+    const NnSize CHUNK = 32u * 1024u;
+    for (NnSize off = 0; off < packBytes; off += CHUNK) {
+        const NnSize n = (packBytes - off < CHUNK) ? (packBytes - off) : CHUNK;
+        if (doSend) {
+            for (NnUint i = 0; i < nSocketsPerThread; i++) {
+                ios[i].socketIndex = threadIndex + i * nThreads;
+                ios[i].data = &sendBuf[off];
+                ios[i].size = n;
+            }
+            network->writeMany(nSocketsPerThread, &ios[0]);
         }
-        network->writeMany(nSocketsPerThread, &ios[0]);
+        if (doRecv) {
+            for (NnUint i = 0; i < nSocketsPerThread; i++) {
+                ios[i].socketIndex = threadIndex + i * nThreads;
+                ios[i].data = &recvBuf[(NnSize)i * packBytes + off];
+                ios[i].size = n;
+            }
+            network->readMany(nSocketsPerThread, &ios[0]);
+        }
     }
 
-    if (!onlyFromWorkerToRoot || !isWorker) {
-        if (recvBuf.size() < packBytes * nSocketsPerThread)
-            recvBuf.resize(packBytes * nSocketsPerThread);
-        for (NnUint i = 0; i < nSocketsPerThread; i++) {
-            ios[i].socketIndex = threadIndex + i * nThreads;
-            ios[i].data = &recvBuf[(NnSize)i * packBytes];
-            ios[i].size = packBytes;
-        }
-        network->readMany(nSocketsPerThread, &ios[0]);
-
+    if (doRecv) {
         for (NnUint i = 0; i < nSocketsPerThread; i++) {
             const NnUint socketIndex = threadIndex + i * nThreads;
             // 소켓 인덱스는 자기 자신을 건너뛴 순서다(_alltoall 과 동일 규칙).
@@ -1954,7 +1972,9 @@ void NnNetworkNodeSynchronizer::sync(NnUint segmentIndex, NnUint nThreads, NnUin
         // 배치 fast path: 행 단위 왕복을 배치 1회로 접는다 (research/06 §4.11).
         // RING 경로는 배치화가 복잡해 STAR 로 처리한다 — 왕복 횟수가 batchSize 배에서
         // 1배로 줄어드는 이득이 RING/STAR 차이보다 훨씬 크다.
-        if (execution->batchSize > 1u &&
+        // DLLAMA_NO_BATCHED_SYNC=1 로 끄면 기존 행 단위 경로로 돌아간다(A/B 대조용).
+        static const bool batchedSyncOff = std::getenv("DLLAMA_NO_BATCHED_SYNC") != nullptr;
+        if (!batchedSyncOff && execution->batchSize > 1u &&
             (syncConfig->syncType == SYNC_NODE_SLICES ||
              syncConfig->syncType == SYNC_NODE_SLICES_EXCEPT_ROOT)) {
             NnUint declaredTpSize = 0;
