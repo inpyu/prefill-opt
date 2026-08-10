@@ -26,7 +26,14 @@ MODEL="${MODEL:-$REPO/dllama_model_llama3-8b_q40.m}"
 TOKENIZER="${TOKENIZER:-$REPO/dllama_tokenizer_llama3.t}"
 BIN="${BIN:-$REPO/dllama}"
 REFDIR="${REFDIR:-$REPO/bench_prefill/verify_ref}"
+# 생성 검사용 짧은 프롬프트(빠름)와 perplexity 용 긴 프롬프트(안정)를 분리한다.
+#
+# 처음에는 13토큰 하나로 둘 다 했더니 perplexity 가 불안정했다. TP4 는 447토큰에서
+# 0.07% 로 검증된 구성인데(§4.9) 13토큰에서는 5.35% 가 나왔다 — 예측 12개를 평균낼
+# 뿐이라 한 토큰의 로그확률만 흔들려도 지표가 크게 움직인다.
+# 게이트가 정상 구성을 떨어뜨리면 게이트가 틀린 것이다.
 PROMPT="${PROMPT:-The capital of France is Paris. The capital of Germany is}"
+PPL_PROMPT_FILE="${PPL_PROMPT_FILE:-$REPO/prompts_gen/prompt_128.txt}"
 STEPS="${STEPS:-24}"
 MAXSEQ="${MAXSEQ:-256}"
 PPLBATCH="${PPLBATCH:-32}"
@@ -39,7 +46,7 @@ PREFIX_MATCH="${PREFIX_MATCH:-8}"   # 앞 몇 개 토큰까지 일치를 요구�
 # 프롬프트를 쓰므로 평균 표본이 적어 편차가 크다.
 # 기존 커널의 expf_neon 근사 바닥(~1e-3)에 더해 짧은 프롬프트 분산을 감안해 1.5% 로 둔다.
 # 깨진 구성은 편차가 1,000,000% 규모라 이 임계로도 확실히 걸린다(SP2 실측).
-PPL_TOL="${PPL_TOL:-1.5}"
+PPL_TOL="${PPL_TOL:-1.0}"
 
 mkdir -p "$REFDIR"
 
@@ -53,7 +60,8 @@ run_gen() {  # $1=out, 나머지=추가 인자
 run_ppl() {  # 나머지=추가 인자 -> perplexity 값 출력
     "$BIN" perplexity --model "$MODEL" --tokenizer "$TOKENIZER" \
         --nthreads 4 --buffer-float-type q80 --max-seq-len "$MAXSEQ" \
-        --n-batches "$PPLBATCH" --ppl-batch "$PPLBATCH" "$@" --prompt "$PROMPT" 2>&1 \
+        --n-batches "$PPLBATCH" --ppl-batch "$PPLBATCH" "$@" \
+        --prompt "$(cat "$PPL_PROMPT_FILE")" 2>&1 \
       | grep -E "^   perplexity:" | tail -1 | awk '{print $2}'
 }
 
