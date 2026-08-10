@@ -96,6 +96,10 @@ public:
     NnUint spPrefillThreshold;
     // 블록 병렬 시뮬레이션 (research/07 Phase A1). 0 이면 비활성.
     bool cpSplit;     // Ring CP: 노드가 자기 토큰 블록만 계산 (spSize>1 에서만 의미)
+    // PP 스테이지별 레이어 수. 비어 있으면 균등 분할.
+    // 파이프라인 처리량은 1/max(스테이지) 이므로, 느린 노드에 레이어를 덜 주면
+    // 최대값이 내려간다. 노드 간 개체차/열 상태가 있는 SBC 클러스터에서 특히 유효하다.
+    std::vector<NnUint> ppLayerCounts;
     NnUint pplBatch;  // perplexity 배치 폭. >1 이면 prefill 배치 커널을 탄다
     int attnFused;    // prefill attention 융합: -1=auto(B로 결정), 0=off, 1=on
     NnUint simBlockSize;

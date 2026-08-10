@@ -90,6 +90,7 @@ struct NnSocketIo {
 };
 
 void nnNetworkSetCpSplit(bool enabled);
+void nnNetworkSetPpLayerOffsets(const std::vector<NnUint> &offsets);
 
 class NnNetwork {
 private:

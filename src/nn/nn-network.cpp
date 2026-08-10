@@ -2495,8 +2495,26 @@ static inline bool isMissingOpByName(const std::invalid_argument &e) {
 
 // Returns the PP stage rank that owns the given layer index.
 // With pp=1 (pure TP), all layers belong to ppRank=0 (UINT_MAX = send to all).
+// PP 스테이지별 레이어 시작 오프셋. 비어 있으면 균등 분할로 계산한다.
+//
+// buildLayerStartOffsets 는 불균등 분할을 지원하는데 이 함수는 균등을 가정하고
+// 있었다. 그래서 --pp-layers 로 불균등 분할을 주면 **가중치가 엉뚱한 노드로 가서**
+// 결과가 틀렸다(게이트 편차 25.9%). 그래프를 만드는 쪽과 같은 오프셋을 쓰게 한다.
+static std::vector<NnUint> gPpLayerOffsets;
+
+void nnNetworkSetPpLayerOffsets(const std::vector<NnUint> &offsets) {
+    gPpLayerOffsets = offsets;
+}
+
 static inline NnUint getLayerOwnerPpRank(NnUint layerIndex, NnUint nLayers, NnUint ppSize) {
     if (ppSize <= 1 || nLayers == 0) return UINT_MAX;
+    if (gPpLayerOffsets.size() == (size_t)ppSize + 1u) {
+        for (NnUint r = 0; r < ppSize; r++) {
+            if (layerIndex >= gPpLayerOffsets[r] && layerIndex < gPpLayerOffsets[r + 1])
+                return r;
+        }
+        return ppSize - 1;
+    }
     NnUint layersPerStage = nLayers / ppSize;
     if (layersPerStage == 0) return UINT_MAX;
     NnUint ppRank = layerIndex / layersPerStage;

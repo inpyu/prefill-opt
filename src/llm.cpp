@@ -236,6 +236,9 @@ LlmNet buildLlmNet(
     n.netConfig = netBuilder.build();
     n.nodeConfigs = new NnNodeConfig[nNodes];
     const std::vector<NnUint> layerOffsets = buildLayerStartOffsets(h->nLayers, topology.ppSize, ppStageLayerCounts);
+    // 가중치 로더가 같은 분할을 쓰도록 알려준다. 이걸 빠뜨리면 불균등 분할에서
+    // 가중치가 엉뚱한 노드로 간다.
+    nnNetworkSetPpLayerOffsets(layerOffsets);
 
     for (NnUint nodeIndex = 0; nodeIndex < nNodes; nodeIndex++) {
         NnNodePlacement nodePlacement = topology.getPlacement(nodeIndex);

@@ -611,6 +611,17 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
             // spSize=N 토폴로지에서 각 노드가 배치의 자기 블록 행만 계산하게 한다.
             // 기본은 꺼둔다 — 켜면 SP 의 기존 의미(전 노드가 전체 배치 계산)가 바뀐다.
             args.cpSplit = atoi(value) == 1;
+        } else if (std::strcmp(name, "--pp-layers") == 0) {
+            // 예: --pp-layers 9,9,7,7  (합이 nLayers 와 같아야 한다)
+            args.ppLayerCounts.clear();
+            const char *cur = value;
+            while (*cur != '\0') {
+                args.ppLayerCounts.push_back((NnUint)atoi(cur));
+                const char *comma = std::strchr(cur, ',');
+                if (comma == nullptr)
+                    break;
+                cur = comma + 1;
+            }
         } else if (std::strcmp(name, "--ppl-batch") == 0) {
             args.pplBatch = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--attn-fused") == 0) {
@@ -1939,7 +1950,13 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
     Sampler sampler(tokenizer.vocabSize, args->temperature, args->topp, args->seed);
 
     const NnUint resolvedNBatches = resolveAutoNBatches(args, &header);
-    LlmNet net = buildLlmNet(&header, topology, resolvedNBatches, nullptr, decodeLogitsMode == 1u);
+    const std::vector<NnUint> *ppLayers = args->ppLayerCounts.empty() ? nullptr : &args->ppLayerCounts;
+    if (ppLayers != nullptr) {
+        printf("🧱 PP 레이어 불균등 분할:");
+        for (NnUint c : *ppLayers) printf(" %u", c);
+        printf("\n");
+    }
+    LlmNet net = buildLlmNet(&header, topology, resolvedNBatches, ppLayers, decodeLogitsMode == 1u);
     std::unique_ptr<LlmNet, void(*)(LlmNet *)> netPtr(&net, releaseLlmNet);
 
     NnNodeConfig *rootNodeConfig = &net.nodeConfigs[0];
