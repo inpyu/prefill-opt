@@ -990,6 +990,13 @@ void RootLlmInference::forward() {
         const unsigned long long tRecvStart = nowUs();
         NnSize bufferSize = logitsPipeRowBytes * controlPacket.batchSize;
         NnByte *bufferPtr = (NnByte *)logitsPipe;
+        // prefill 에서는 마지막 행만 받는다(송신 측 주석 참조).
+        // 받은 값을 마지막 행 위치에 놓아야 이후 샘플링이 그대로 동작한다.
+        if (controlPacket.phase != 1u && controlPacket.batchSize > 1u) {
+            bufferPtr = (NnByte *)logitsPipe +
+                (NnSize)(controlPacket.batchSize - 1u) * logitsPipeRowBytes;
+            bufferSize = logitsPipeRowBytes;
+        }
         if (decodeLogitsMode == 1u && controlPacket.phase == 1u && controlPacket.batchSize == 1u) {
             bufferSize = sizeof(float);
             bufferPtr = (NnByte *)&tokenFromWorker;
@@ -1754,6 +1761,20 @@ void WorkerLlmInference::afterForward() {
         // when TP > 1.
         NnSize payloadBytes = logitsPipeRowBytes * execution->batchSize;
         NnByte *payloadPtr = logitsPipe;
+        // prefill 에서는 **마지막 행만** 보낸다.
+        //
+        // 전체를 보내면 마이크로배치당 batchSize x vocab x 4 = 16 x 128,256 x 4
+        // = 8.2 MB 이고, 28개면 230 MB 다. 게다가 root 는 마이크로배치를 밀어 넣느라
+        // 이걸 즉시 읽지 않으므로 소켓 버퍼가 차서 **마지막 스테이지의 send 가 막힌다**
+        // (실측 send=5,667 ms). 파이프라인 처리량이 1/max(스테이지) 이므로 전체가 끌린다.
+        //
+        // prefill 이 필요로 하는 로짓은 프롬프트 마지막 토큰의 것 하나뿐이다
+        // (lm_head 도 이미 마지막 행만 계산한다 — lmHeadRowRange).
+        // 중간 마이크로배치의 로짓은 root 가 읽지도 않는다.
+        if (!decodePhase && execution->batchSize > 1u) {
+            payloadPtr = logitsPipe + (NnSize)(execution->batchSize - 1u) * logitsPipeRowBytes;
+            payloadBytes = logitsPipeRowBytes;
+        }
         float sampledToken = 0.0f;
         if (controlPacket.tokenOnlyMode == 1u && decodePhase && execution->batchSize == 1u) {
             if (fusedLmHeadArgmax) {
@@ -2232,6 +2253,22 @@ void runWorkerApp(AppCliArgs *args) {
                     }
                     inference.afterForward();
                     const unsigned long long tSend1 = needsWorkerTokenTiming ? nowUs() : 0;
+                    // prefill 스테이지 진단.
+                    //
+                    // recordStageTiming 은 decode + batchSize==1 에서만 기록하므로
+                    // prefill 은 수집되지 않는다. PP 파이프라인의 병목이 워커의
+                    // 연산인지(forward), 상류 대기인지(recv), 하류 막힘인지(send)를
+                    // 가르려면 prefill 에서 이 셋을 봐야 한다.
+                    if (needsWorkerTokenTiming && !inference.isDecodePhase()) {
+                        static int pfN = 0;
+                        if (pfN++ < 8) {
+                            printf("🧩 [WSTAGE] node=%u ppRank=%u batch=%u recv=%.1fms fwd=%.1fms send=%.1fms\n",
+                                nodeConfig.nodeIndex, nodeConfig.ppRank, execution.batchSize,
+                                (tRecv1 - tRecv0) / 1000.0, (tFwd1 - tFwd0) / 1000.0,
+                                (tSend1 - tFwd1) / 1000.0);
+                            fflush(stdout);
+                        }
+                    }
                     if (needsWorkerTokenTiming) {
                         inference.recordStageTiming(
                             (NnUint)(tRecv1 - tRecv0),
