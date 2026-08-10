@@ -159,12 +159,30 @@ static inline void setNonBlocking(int socket, bool enabled) {
 #endif
 }
 
-static inline void setNoDelay(int socket) {
+static inline void setLargeBuffers(int socket) {
+    int size = 8 * 1024 * 1024;
+    // 실패해도 치명적이지 않다(커널 상한에 걸리면 커널이 잘라준다). 경고만 남긴다.
+    if (setsockopt(socket, SOL_SOCKET, SO_SNDBUF, (char *)&size, sizeof(size)) < 0)
+        printf("⚠️  SO_SNDBUF 설정 실패\n");
+    if (setsockopt(socket, SOL_SOCKET, SO_RCVBUF, (char *)&size, sizeof(size)) < 0)
+        printf("⚠️  SO_RCVBUF 설정 실패\n");
+}
+
+static inline void setNoDelayAndBuffers(int socket) {
+    setLargeBuffers(socket);
     int flag = 1;
     if (setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int)) < 0)
         throw std::runtime_error("Error setting socket to no-delay");
 }
 
+// 소켓 송수신 버퍼를 키운다.
+//
+// PP 파이프라인에서 root 는 마이크로배치를 하류에 보내고 기다리지 않아야 겹침이
+// 생긴다. 그런데 활성화 1개가 B x dim x 4 = 524 kB(B=32)라, 기본 버퍼로는 하류가
+// 읽을 때까지 send 가 막힌다. 즉 **파이프라인 깊이가 소켓 버퍼로 제한**된다.
+// 실측에서 겹침을 켜도 가속이 없었고(PP4 B=32 32,661 vs 단일 30,107), B=16 이
+// B=32 보다 오히려 나빴다(93,896) — 마이크로배치당 고정 비용이 지배한다는 뜻이다.
+// 버퍼를 8 MB 로 두면 마이크로배치 여러 개를 미리 밀어넣을 수 있다.
 static inline void setQuickAck(int socket) {
 #ifndef _WIN32
 #ifdef TCP_QUICKACK
@@ -408,7 +426,7 @@ static inline int connectSocket(char *host, int port) {
         flags = fcntl(sock, F_GETFL, 0);
         fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
         #endif
-        setNoDelay(sock);
+        setNoDelayAndBuffers(sock);
         setQuickAck(sock);
         freeaddrinfo(addr);
         return sock;
@@ -498,7 +516,7 @@ static inline int connectSocket(char *host, int port) {
     fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
     #endif
 
-    setNoDelay(sock);
+    setNoDelayAndBuffers(sock);
     setQuickAck(sock);
     freeaddrinfo(addr);
     return sock;
@@ -546,7 +564,7 @@ int createServerSocket(int port) {
 
     printf("Listening on %s:%d...\n", host, port);
 
-    setNoDelay(serverSocket);
+    setNoDelayAndBuffers(serverSocket);
     setQuickAck(serverSocket);
     return serverSocket;
 }
@@ -566,7 +584,7 @@ int acceptSocket(int serverSocket) {
     int clientSocket = ::accept(serverSocket, (struct sockaddr*)&clientAddr, &clientAddrSize);
     if (clientSocket < 0)
         throw std::runtime_error("Error accepting connection");
-    setNoDelay(clientSocket);
+    setNoDelayAndBuffers(clientSocket);
     setQuickAck(clientSocket);
     return clientSocket;
 }
