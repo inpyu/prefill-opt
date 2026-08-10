@@ -250,6 +250,9 @@ LlmNet buildLlmNet(
         // Calculate layer range for this PP stage
         NnUint layerStart = layerOffsets[nodePlacement.ppRank];
         NnUint layerEnd = layerOffsets[nodePlacement.ppRank + 1];
+        if (topology.ppSize > 1)
+            printf("🧱 node=%u ppRank=%u layers=[%u,%u) count=%u\n",
+                nodeIndex, nodePlacement.ppRank, layerStart, layerEnd, layerEnd - layerStart);
         NnNodeConfigBuilder nodeBuilder(nodeIndex);
 
         const NnUint xBufferIndex = nodeBuilder.addBuffer("x", size2D(F_32, nBatches, h->dim));

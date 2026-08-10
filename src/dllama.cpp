@@ -468,7 +468,15 @@ static void inference(AppInferenceContext *context) {
             context->inference->setToken(i, inputTokens[pos + i]);
 
         if (useWave) {
+            // 겹침 진단: root 가 자기 스테이지(레이어 0..k)만 하는지, 아니면
+            // 여기서 워커를 기다리는지 가른다. 자기 몫만 하면 전체 모델 시간의
+            // 1/ppSize 여야 한다.
+            const auto wt0 = std::chrono::high_resolution_clock::now();
             context->inference->forwardPrefillNoWait();
+            const auto wt1 = std::chrono::high_resolution_clock::now();
+            if (prefillChunkCount < 6)
+                printf("🌊 wave chunk=%u forwardMs=%.1f\n", prefillChunkCount,
+                    std::chrono::duration<double, std::milli>(wt1 - wt0).count());
             waveChunkCount++;
         } else {
             context->inference->forward();
