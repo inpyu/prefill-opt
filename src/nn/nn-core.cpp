@@ -86,6 +86,7 @@ const char *opCodeToString(NnOpCode code) {
     if (code == OP_CAST) return "CAST";
     if (code == OP_REPEAT_Z) return "REPEAT_Z";
     if (code == OP_SHIFT) return "SHIFT";
+    if (code == OP_PRUNE_TOKENS) return "PRUNE_TOKENS";
     if (code == OP_SOFTMAX) return "SOFTMAX";
     if (code == OP_MATMUL_ARGMAX) return "MATMUL_ARGMAX";
     if (code == OP_ARGMAX_REDUCE) return "ARGMAX_REDUCE";

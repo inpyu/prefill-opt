@@ -451,6 +451,9 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
     args.cpSplit = false;
+    args.pruneLayer = UINT32_MAX;
+    args.pruneKeep = 1.0f;
+    args.pplEvalTail = 0;
     args.pplBatch = 1;
     args.attnFused = -1; // auto
     args.simBlockSize = 0;
@@ -622,6 +625,12 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
                     break;
                 cur = comma + 1;
             }
+        } else if (std::strcmp(name, "--prune-layer") == 0) {
+            args.pruneLayer = (unsigned int)atoi(value);
+        } else if (std::strcmp(name, "--prune-keep") == 0) {
+            args.pruneKeep = (float)atof(value);
+        } else if (std::strcmp(name, "--ppl-eval-tail") == 0) {
+            args.pplEvalTail = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--ppl-batch") == 0) {
             args.pplBatch = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--attn-fused") == 0) {
@@ -1956,7 +1965,11 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
         for (NnUint c : *ppLayers) printf(" %u", c);
         printf("\n");
     }
-    LlmNet net = buildLlmNet(&header, topology, resolvedNBatches, ppLayers, decodeLogitsMode == 1u);
+    if (args->pruneLayer != UINT32_MAX) {
+        nnCpuOpsSetPrune(args->pruneLayer, args->pruneKeep);
+        printf("✂️  토큰 가지치기: layer=%u keep=%.2f\n", args->pruneLayer, args->pruneKeep);
+    }
+    LlmNet net = buildLlmNet(&header, topology, resolvedNBatches, ppLayers, args->pruneLayer, decodeLogitsMode == 1u);
     std::unique_ptr<LlmNet, void(*)(LlmNet *)> netPtr(&net, releaseLlmNet);
 
     NnNodeConfig *rootNodeConfig = &net.nodeConfigs[0];

@@ -81,6 +81,10 @@ NnNetExecution::~NnNetExecution() {
 void NnNetExecution::setBatchSize(NnUint batchSize) {
     assert(batchSize <= nBatches);
     this->batchSize = batchSize;
+    // 가지치기 상태는 forward 마다 초기화해야 한다.
+    // 남겨두면 다음 청크의 레이어 0..k-1 이 **이전 청크의 잔존 수**를 물려받아
+    // 토큰 일부를 통째로 빠뜨린다. keep=1.0 에서는 드러나지 않는 종류의 버그다.
+    nnCpuOpsResetActiveRows();
 }
 
 NnExecutorDevice::NnExecutorDevice(NnDevice *device, int segmentFrom, int segmentTo) {

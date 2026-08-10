@@ -182,6 +182,7 @@ LlmNet buildLlmNet(
     const NnParallelTopology &topology,
     NnUint nBatches,
     const std::vector<NnUint> *ppStageLayerCounts,
+    NnUint pruneLayer,
     bool fusedLmHeadArgmax
 ) {
     NnUint nNodes = topology.nNodes;
@@ -320,6 +321,19 @@ LlmNet buildLlmNet(
 
             NnSegmentConfigBuilder att;
             NnSegmentConfigBuilder ff;
+
+            // 토큰 가지치기 (research/10). 지정된 레이어 진입 시점에 살아남은 행을
+            // 앞으로 압축하고, 이후 모든 op 가 줄어든 행 수만 돈다.
+            // 잔존 수가 데이터에 따라 달라지므로 스테이지 부하도 달라진다 —
+            // 이것이 온라인 재분할이 필요해지는 이유다.
+            if (pruneLayer != UINT32_MAX && layerIndex == pruneLayer) {
+                att.addOp(
+                    OP_PRUNE_TOKENS, "block_prune_tokens", layerIndex,
+                    pointerBatchConfig(SRC_BUFFER, xBufferIndex),
+                    pointerBatchConfig(SRC_BUFFER, xBufferIndex),
+                    size0(),
+                    NnPruneTokensOpCodeConfig{n.positionPipeIndex});
+            }
 
             // att
             if (layerIndex == layerStart) {

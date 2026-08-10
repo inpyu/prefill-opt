@@ -92,6 +92,9 @@ enum NnOpCode {
     OP_MATMUL_ARGMAX,
     OP_ARGMAX_REDUCE,
     OP_MOE_GATE,
+    // 토큰 가지치기 + 압축. enum 끝에 추가해야 기존 op 코드 번호가 밀리지 않는다
+    // (워커로 직렬화되는 값이다).
+    OP_PRUNE_TOKENS,
 };
 
 enum NnOpQuantType {
@@ -301,6 +304,10 @@ typedef struct {
     NnUint localSeqStart; // SP: only write pos if >= localSeqStart (0 = no guard)
     NnUint localSeqLen;   // SP: only write pos if < localSeqStart+localSeqLen (0 = write all)
 } NnShiftOpCodeConfig;
+
+typedef struct {
+    NnUint positionPipeIndex;
+} NnPruneTokensOpCodeConfig;
 
 typedef struct {
     // empty

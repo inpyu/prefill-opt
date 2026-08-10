@@ -104,6 +104,7 @@ LlmNet buildLlmNet(
     const NnParallelTopology &topology,
     NnUint nBatches,
     const std::vector<NnUint> *ppStageLayerCounts = nullptr,
+    NnUint pruneLayer = UINT32_MAX,
     bool fusedLmHeadArgmax = false
 );
 void releaseLlmNet(LlmNet *net);

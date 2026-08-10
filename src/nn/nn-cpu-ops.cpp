@@ -840,6 +840,14 @@ void nnCpuOpsSetBlockMask(NnUint blockSize, NnUint anchorLen) {
 //   - lm_head: 마지막 행이 있어야 한다.
 //
 // 블록 배정은 spRank 를 그대로 따른다(cpRowWindow 주석 참조).
+static std::atomic<NnUint> gActiveRows{0u};   // 가지치기 후 살아남은 행 수 (0 = 미적용)
+
+// 이 노드가 지금 처리해야 하는 행 수. 가지치기 전에는 batchSize 그대로다.
+static inline NnUint activeRowCount(NnUint batchSize) {
+    const NnUint a = gActiveRows.load(std::memory_order_relaxed);
+    return (a == 0u || a > batchSize) ? batchSize : a;
+}
+
 static std::atomic<NnUint> gCpSize{1u};
 static std::atomic<NnUint> gCpRank{0u};
 
@@ -849,6 +857,8 @@ void nnCpuOpsSetCpRange(NnUint cpSize, NnUint cpRank) {
 }
 
 static inline void cpRowWindow(NnUint batchSize, NnUint *begin, NnUint *count) {
+    // 가지치기가 적용됐으면 살아남은 행만 본다. 압축으로 [0,keep) 에 모여 있다.
+    batchSize = activeRowCount(batchSize);
     const NnUint n = gCpSize.load(std::memory_order_relaxed);
     // batchSize < n 이면 나눌 것이 없다(decode 는 batchSize=1). 전체를 본다.
     if (n <= 1u || batchSize < n) {
@@ -1064,8 +1074,15 @@ static void multiheadAttFused_F32(
         headStride = 1u;
     }
 
-    // 타일 폭. B=32 / kvMul=4 기준 스크래치는 32*4*128*4B = 64 kB 로 L2(코어당
-    // 512 kB) 안에 들어온다. seqLen 과 무관하다는 점이 이 커널의 요지다.
+    // 타일 폭.
+    //
+    // ── 이식성 ──
+    // 이 값은 **플랫폼 측정값**이지 알고리즘의 일부가 아니다. 유도는 이렇다:
+    //   스크래치 = BR x kvMul x TILE x 4B 가 코어당 L2 에 들어와야 한다.
+    //   Pi5(Cortex-A76, L2 512 kB/코어): 32 x 4 x 128 x 4 = 64 kB  -> 여유 있음
+    // 캐시가 다른 CPU 로 옮기면 이 두 상수를 다시 재야 한다. 일반화되는 것은
+    // "스크래치를 L2 안에 유지한다"는 규칙이고 128/32 라는 숫자가 아니다.
+    // (research/06 §4.7 의 스윕 방법이 그 규칙을 재는 절차다)
     const NnUint TILE = 128u;
 
 
@@ -1188,7 +1205,15 @@ static void multiheadAttFused_F32(
 #endif
                     }
 
-                    // exp 는 반드시 softmax_F32 와 같은 expf_neon 을 쓴다.
+                    // exp 는 반드시 softmax_F32 와 같은 근사를 써야 한다.
+                    //
+                    // ⚠️ 이식성 결함(미해결): softmax_F32 는 아키텍처마다 다른 exp 를
+                    // 쓴다 — ARM 은 expf_neon, x86 은 AVX2 경로의 자체 근사다.
+                    // 아래 NEON 경로는 expf_neon 으로 맞췄지만, **비-NEON fallback 은
+                    // libm expf 를 쓰므로 x86 에서는 두 커널의 exp 가 어긋난다.**
+                    // ARM 에서 이 불일치가 두 커널 간 상대 L2 오차 9.8e-4 를 만들었다
+                    // (research/06 §4.9). x86 에서 쓰기 전에 두 커널이 같은 exp 를
+                    // 부르도록 공통 헬퍼로 빼야 한다. 검증할 x86 장비가 없어 남겨둔다.
                     //
                     // 처음에 libm expf 를 썼더니 기존 커널과 상대 L2 오차가 1e-3 이
                     // 났다(재결합이면 1e-6 수준이어야 한다). 원인은 버그가 아니라
@@ -1287,6 +1312,102 @@ static void multiheadAttFused_F32(
         }
         } // b-타일
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// 토큰 가지치기 + 압축 (research/10)
+//
+// 깊은 레이어일수록 토큰을 줄여 연산을 감축한다. FFN 이 레이어당 FLOPs 의 81 %
+// 이므로 토큰 수를 r 배로 줄이면 그 레이어의 비용이 그대로 r 배가 된다.
+//
+// **압축을 쓰는 이유**: 마스크로 건너뛰면 살아남은 행이 비연속이라 Q4_0 repack 의
+// 4행 GEMM 타일이 반만 찬다(§4.7 에서 B=8 이 2배 손해였던 것과 같은 이유).
+// 살아남은 행을 [0,k) 로 모으면 타일이 그대로 채워진다. CPU 는 가변 행 수에
+// 페널티가 없으므로 이 선택이 가능하다 — GPU 의 SIMT 에서는 불리하다.
+//
+// **위치 순서를 반드시 보존한다.** 살아남은 인덱스를 오름차순으로 정렬해 모아야
+// causal 관계와 RoPE 위치가 유지된다.
+//
+// **마지막 행은 무조건 보존한다.** prefill 의 출력은 마지막 토큰의 로짓 하나다.
+static std::atomic<float> gPruneKeepRatio{1.0f};
+static std::atomic<NnUint> gPruneLayer{UINT32_MAX};
+
+void nnCpuOpsSetPrune(NnUint layerIndex, float keepRatio) {
+    gPruneLayer.store(layerIndex, std::memory_order_relaxed);
+    gPruneKeepRatio.store(keepRatio, std::memory_order_relaxed);
+}
+
+void nnCpuOpsResetActiveRows() {
+    gActiveRows.store(0u, std::memory_order_relaxed);
+}
+
+NnUint nnCpuOpsGetActiveRows() {
+    return gActiveRows.load(std::memory_order_relaxed);
+}
+
+
+static void initPruneTokensForward(NnCpuOpContext *context) {
+    ASSERT_EQ(context->inputSize.x, context->outputSize.x);
+}
+
+static void pruneTokensForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+    if (threadIndex != 0)
+        return;   // 행을 옮기는 작업이라 단일 스레드로 한다(비용은 dim 규모로 작다)
+
+    const NnPruneTokensOpCodeConfig *config = (NnPruneTokensOpCodeConfig *)context->opConfig;
+    float *positions = (float *)context->pipes[config->positionPipeIndex];
+    const float ratio = gPruneKeepRatio.load(std::memory_order_relaxed);
+    const NnUint cur = activeRowCount(batchSize);
+
+    if (ratio >= 1.0f || cur <= 1u) {
+        gActiveRows.store(cur, std::memory_order_relaxed);
+        return;
+    }
+
+    NnUint keep = (NnUint)(cur * ratio);
+    if (keep < 1u) keep = 1u;
+    if (keep >= cur) {
+        gActiveRows.store(cur, std::memory_order_relaxed);
+        return;
+    }
+
+    // 중요도: 활성화 노름. (attention 수신량은 P2 에서 붙인다)
+    const NnUint dim = context->inputSize.x;
+    thread_local std::vector<std::pair<float, NnUint>> score;
+    score.clear();
+    score.reserve(cur);
+    for (NnUint b = 0; b < cur; b++) {
+        const float *x = (const float *)context->input[b];
+        float sum = 0.0f;
+        for (NnUint i = 0; i < dim; i++)
+            sum += x[i] * x[i];
+        score.push_back(std::make_pair(sum, b));
+    }
+
+    // 마지막 행은 무조건 보존한다.
+    score[cur - 1u].first = std::numeric_limits<float>::infinity();
+
+    // 상위 keep 개를 고르고, **행 인덱스 오름차순**으로 되돌린다.
+    std::partial_sort(score.begin(), score.begin() + keep, score.end(),
+        [](const std::pair<float, NnUint> &a, const std::pair<float, NnUint> &b) {
+            return a.first > b.first;
+        });
+    thread_local std::vector<NnUint> keepIdx;
+    keepIdx.clear();
+    for (NnUint i = 0; i < keep; i++)
+        keepIdx.push_back(score[i].second);
+    std::sort(keepIdx.begin(), keepIdx.end());
+
+    // 압축: 살아남은 행을 [0,keep) 으로 모은다. 위치도 같이 옮긴다.
+    const NnSize rowBytes = getBytes(F_32, dim);
+    for (NnUint i = 0; i < keep; i++) {
+        const NnUint src = keepIdx[i];
+        if (src != i)
+            std::memcpy(context->output[i], context->input[src], rowBytes);
+        positions[i] = positions[src];
+    }
+    gActiveRows.store(keep, std::memory_order_relaxed);
 }
 
 static void mul_F32(float *y, const float *x, const float *m, const NnUint n, const NnUint nThreads, const NnUint threadIndex) {
@@ -2502,6 +2623,9 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType) {
     }
     if (code == OP_SHIFT) {
         if (quantType == F32_F32_F32) return shiftForward_F32_F32;
+    }
+    if (code == OP_PRUNE_TOKENS) {
+        if (quantType == F32_F32_F32) return pruneTokensForward_F32_F32;
     }
     if (code == OP_SOFTMAX) {
         if (quantType == F32_F32_F32) return softmaxForward_F32_F32;

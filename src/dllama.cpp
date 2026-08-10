@@ -809,6 +809,43 @@ static void perplexity(AppInferenceContext *context) {
     const NnUint pplBatch = std::max(1u, std::min(context->args->pplBatch, context->args->nBatches));
     context->inference->setDecodePhase(true);
 
+    // 꼬리 평가 모드: 앞부분을 배치 prefill(가지치기 적용)로 처리한 뒤,
+    // 마지막 evalTail 개 토큰을 batchSize=1 로 하나씩 평가한다.
+    //
+    // 왜 필요한가: 가지치기는 행을 압축하므로 **logitsPipe 의 행 i 가 더 이상
+    // 토큰 i 가 아니다.** 배치 perplexity 는 행↔토큰 대응을 전제하므로 조용히
+    // 무효가 된다(실측에서 keep=0.9 인데 perplexity 가 486배로 나왔다 — 생성은
+    // 멀쩡했다). 꼬리 평가는 prefill 로 만든 KV 의 품질을 batchSize=1 경로로
+    // 재므로 대응 문제가 없고, TTFT 목적의 가지치기가 실제로 해치는 것
+    // (이후 예측 능력)을 직접 잰다.
+    const NnUint evalTail = context->args->pplEvalTail;
+    if (evalTail > 0u && (NnUint)nInputTokens > evalTail + 1u) {
+        const NnUint prefillEnd = (NnUint)nInputTokens - evalTail;
+        const NnUint width = std::max(1u, std::min(context->args->nBatches, prefillEnd));
+        for (NnUint s0 = 0; s0 < prefillEnd; s0 += width) {
+            const NnUint n = std::min(width, prefillEnd - s0);
+            context->inference->setBatchSize(n);
+            context->inference->setPosition(s0);
+            for (NnUint i = 0; i < n; i++)
+                context->inference->setToken(i, inputTokens[s0 + i]);
+            context->inference->forward();
+        }
+        context->inference->setBatchSize(1);
+        for (NnUint pos2 = prefillEnd; pos2 < (NnUint)nInputTokens - 1u; pos2++) {
+            context->inference->setPosition(pos2);
+            context->inference->setToken(0, inputTokens[pos2]);
+            context->inference->forward();
+            float *logits = context->inference->logitsPipe;
+            softmax_F32(logits, context->header->vocabSize);
+            totalLogProb += std::log(std::max(logits[inputTokens[pos2 + 1]], 1e-30f));
+        }
+        const float avgT = totalLogProb / (float)(nInputTokens - 1 - (int)prefillEnd);
+        printf("\nResults\n");
+        printf("   perplexity: %f (lower = better)\n", expf(-avgT));
+        printf("   avgLogProb: %f\n", avgT);
+        return;
+    }
+
     if (pplBatch > 1u) {
         printf("   (배치 perplexity: width=%u)\n", pplBatch);
         const NnUint nEval = (NnUint)(nInputTokens - 1);
