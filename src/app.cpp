@@ -2290,8 +2290,11 @@ void runWorkerApp(AppCliArgs *args) {
                     // 연산인지(forward), 상류 대기인지(recv), 하류 막힘인지(send)를
                     // 가르려면 prefill 에서 이 셋을 봐야 한다.
                     if (needsWorkerTokenTiming && !inference.isDecodePhase()) {
+                        // 표본을 넉넉히 찍는다. 1개만 보면 노드 간 비교가 노이즈에
+                        // 묻힌다 — 실제로 레이어 수 대비 선형성을 판정하려다 기계마다
+                        // 부호가 갈리는 결과를 얻었다(research/11 §8).
                         static int pfN = 0;
-                        if (pfN++ < 8) {
+                        if (pfN++ < 40) {
                             printf("🧩 [WSTAGE] node=%u ppRank=%u batch=%u recv=%.1fms fwd=%.1fms send=%.1fms\n",
                                 nodeConfig.nodeIndex, nodeConfig.ppRank, execution.batchSize,
                                 (tRecv1 - tRecv0) / 1000.0, (tFwd1 - tFwd0) / 1000.0,
