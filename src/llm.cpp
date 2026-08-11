@@ -10,6 +10,46 @@
 #include <climits>
 #include <stdexcept>
 
+// 서브블록 오프셋. 레이어 하나를 att / ff 두 서브블록으로 나눈다.
+//
+// 왜 필요한가 (research/06 §4.16): 레이어 단위 PP 는 N 이 커지면 조정 입자도가
+// 너무 거칠어진다. N=8 이면 레이어 1개가 목표 스테이지 시간의 22 % 라, 느린 노드를
+// 한 레이어 줄이면 다른 노드가 새 최대가 되어 균형화가 실패한다.
+// FFN 이 레이어 FLOPs 의 81 % 이므로 att|ff 경계로 자르면 입자도가 대략 절반이 된다.
+//
+// 경계 자체는 기존 브리지가 그대로 처리한다 — MERGE_ADD(zqPipe→x) 후 CAST(x→xPipe)
+// 는 att 뒤에서도 ff 뒤에서도 같은 의미다.
+static std::vector<NnUint> buildSubBlockOffsets(NnUint nLayers, NnUint ppSize,
+                                                const std::vector<NnUint> *ppStageSubCounts) {
+    const NnUint nSub = nLayers * 2u;
+    std::vector<NnUint> offsets(ppSize + 1, 0u);
+    if (ppStageSubCounts != nullptr && !ppStageSubCounts->empty()) {
+        if (ppStageSubCounts->size() != ppSize)
+            throw std::runtime_error("ppStageSubCounts size mismatch with ppSize");
+        NnUint sum = 0;
+        for (NnUint i = 0; i < ppSize; i++) {
+            if ((*ppStageSubCounts)[i] == 0u)
+                throw std::runtime_error("ppStageSubCounts must be > 0 for all stages");
+            offsets[i] = sum;
+            sum += (*ppStageSubCounts)[i];
+        }
+        offsets[ppSize] = sum;
+        if (sum != nSub)
+            throw std::runtime_error("ppStageSubCounts sum must match nLayers*2");
+        return offsets;
+    }
+    // 균등 분할.
+    const NnUint per = nSub / ppSize;
+    const NnUint rem = nSub % ppSize;
+    NnUint acc = 0;
+    for (NnUint i = 0; i < ppSize; i++) {
+        offsets[i] = acc;
+        acc += per + (i < rem ? 1u : 0u);
+    }
+    offsets[ppSize] = acc;
+    return offsets;
+}
+
 static std::vector<NnUint> buildLayerStartOffsets(NnUint nLayers, NnUint ppSize, const std::vector<NnUint> *ppStageLayerCounts) {
     std::vector<NnUint> offsets(ppSize + 1, 0u);
     if (ppStageLayerCounts != nullptr && !ppStageLayerCounts->empty()) {
@@ -236,10 +276,32 @@ LlmNet buildLlmNet(
     n.header = h;
     n.netConfig = netBuilder.build();
     n.nodeConfigs = new NnNodeConfig[nNodes];
-    const std::vector<NnUint> layerOffsets = buildLayerStartOffsets(h->nLayers, topology.ppSize, ppStageLayerCounts);
+    // 서브블록(레이어당 att/ff 2개) 단위 분할. --pp-layers 가 서브블록 수를 주면
+    // 그대로 쓰고, 없으면 균등 분할한다.
+    const bool subMode = ppStageLayerCounts != nullptr && !ppStageLayerCounts->empty()
+        && ppStageLayerCounts->size() == topology.ppSize
+        && [&]{ NnUint sm = 0; for (NnUint c : *ppStageLayerCounts) sm += c; return sm == h->nLayers * 2u; }();
+    const std::vector<NnUint> subOffsets = subMode
+        ? buildSubBlockOffsets(h->nLayers, topology.ppSize, ppStageLayerCounts)
+        : std::vector<NnUint>();
+    const std::vector<NnUint> layerOffsets = subMode
+        ? std::vector<NnUint>()
+        : buildLayerStartOffsets(h->nLayers, topology.ppSize, ppStageLayerCounts);
     // 가중치 로더가 같은 분할을 쓰도록 알려준다. 이걸 빠뜨리면 불균등 분할에서
     // 가중치가 엉뚱한 노드로 간다.
-    nnNetworkSetPpLayerOffsets(layerOffsets);
+    // 로더가 같은 분할을 쓰도록 **서브블록 단위**로 알려준다.
+    // 레이어 단위로 주면 att/ff 가 다른 노드로 갈릴 때 가중치가 엉뚱한 곳으로 간다.
+    {
+        std::vector<NnUint> subForLoader;
+        if (subMode) {
+            subForLoader = subOffsets;
+        } else {
+            subForLoader.resize(layerOffsets.size());
+            for (size_t i = 0; i < layerOffsets.size(); i++)
+                subForLoader[i] = layerOffsets[i] * 2u;
+        }
+        nnNetworkSetPpLayerOffsets(subForLoader);
+    }
 
     for (NnUint nodeIndex = 0; nodeIndex < nNodes; nodeIndex++) {
         NnNodePlacement nodePlacement = topology.getPlacement(nodeIndex);
@@ -252,11 +314,17 @@ LlmNet buildLlmNet(
         NnRopeSlice ropeSlice = sliceRope(h->ropeType, h->qDim, h->kvDim, h->nKvHeads, tpSize, h->seqLen, h->headDim, h->ropeTheta, nodePlacement.tpRank);
 
         // Calculate layer range for this PP stage
-        NnUint layerStart = layerOffsets[nodePlacement.ppRank];
-        NnUint layerEnd = layerOffsets[nodePlacement.ppRank + 1];
+        // 이 노드가 맡은 서브블록 구간 [subStart, subEnd). 서브블록 s 는
+        // layer = s/2, part = s%2 (0=att, 1=ff) 다.
+        const NnUint subStart = subMode ? subOffsets[nodePlacement.ppRank]
+                                        : layerOffsets[nodePlacement.ppRank] * 2u;
+        const NnUint subEnd = subMode ? subOffsets[nodePlacement.ppRank + 1]
+                                      : layerOffsets[nodePlacement.ppRank + 1] * 2u;
+        NnUint layerStart = subStart / 2u;
+        NnUint layerEnd = (subEnd + 1u) / 2u;
         if (topology.ppSize > 1)
-            printf("🧱 node=%u ppRank=%u layers=[%u,%u) count=%u\n",
-                nodeIndex, nodePlacement.ppRank, layerStart, layerEnd, layerEnd - layerStart);
+            printf("🧱 node=%u ppRank=%u sub=[%u,%u) layers=[%u,%u)\n",
+                nodeIndex, nodePlacement.ppRank, subStart, subEnd, layerStart, layerEnd);
         NnNodeConfigBuilder nodeBuilder(nodeIndex);
 
         const NnUint xBufferIndex = nodeBuilder.addBuffer("x", size2D(F_32, nBatches, h->dim));
@@ -322,6 +390,11 @@ LlmNet buildLlmNet(
             NnSegmentConfigBuilder att;
             NnSegmentConfigBuilder ff;
 
+            const NnUint subAtt = layerIndex * 2u;
+            const NnUint subFf = subAtt + 1u;
+            const bool ownAtt = subAtt >= subStart && subAtt < subEnd;
+            const bool ownFf = subFf >= subStart && subFf < subEnd;
+
             // 토큰 가지치기 (research/10). 지정된 레이어 진입 시점에 살아남은 행을
             // 앞으로 압축하고, 이후 모든 op 가 줄어든 행 수만 돈다.
             // 잔존 수가 데이터에 따라 달라지므로 스테이지 부하도 달라진다 —
@@ -335,8 +408,8 @@ LlmNet buildLlmNet(
                     NnPruneTokensOpCodeConfig{n.positionPipeIndex});
             }
 
-            // att
-            if (layerIndex == layerStart) {
+            // att. 스테이지의 첫 서브블록이면 상류에서 받은 xPipe 를 x 로 옮긴다.
+            if (subAtt == subStart) {
                 att.addOp(
                     OP_CAST, "block_cast_x", layerIndex,
                     pointerBatchConfig(SRC_PIPE, n.xPipeIndex),
@@ -486,6 +559,18 @@ LlmNet buildLlmNet(
                 pointerBatchConfig(SRC_BUFFER, xBufferIndex),
                 size0(),
                 NnMergeAddOpCodeConfig{});
+            if (subFf == subStart) {
+                // ff 가 스테이지의 첫 서브블록이다. 위 MERGE_ADD 는 이 노드가
+                // 계산하지 않은 attention 결과를 더하려는 것이므로 의미가 없다.
+                // 대신 상류가 보낸 x 를 받는다(브리지가 이미 잔차를 합쳐서 보낸다).
+                ff = NnSegmentConfigBuilder();
+                ff.addOp(
+                    OP_CAST, "block_cast_x_ff", layerIndex,
+                    pointerBatchConfig(SRC_PIPE, n.xPipeIndex),
+                    pointerBatchConfig(SRC_BUFFER, xBufferIndex),
+                    size0(),
+                    NnCastOpCodeConfig{});
+            }
             ff.addOp(
                 OP_INV_RMS, "block_norm_pre_1", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, xBufferIndex),
@@ -635,8 +720,10 @@ LlmNet buildLlmNet(
             // 잔차는 레이어 사이에 노드 로컬 버퍼에 있고 xPipe 는 그 시점에 비어 있다.
             // 로짓 회수는 실제 잔차가 있는 버퍼를 찾아 다시 설계해야 한다.
 
-            nodeBuilder.addSegment(att.build());
-            nodeBuilder.addSegment(ff.build());
+            if (ownAtt)
+                nodeBuilder.addSegment(att.build());
+            if (ownFf)
+                nodeBuilder.addSegment(ff.build());
         }
 
         if (nodePlacement.ppRank < topology.ppSize - 1) {

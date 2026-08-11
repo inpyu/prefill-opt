@@ -2500,17 +2500,36 @@ static inline bool isMissingOpByName(const std::invalid_argument &e) {
 // buildLayerStartOffsets 는 불균등 분할을 지원하는데 이 함수는 균등을 가정하고
 // 있었다. 그래서 --pp-layers 로 불균등 분할을 주면 **가중치가 엉뚱한 노드로 가서**
 // 결과가 틀렸다(게이트 편차 25.9%). 그래프를 만드는 쪽과 같은 오프셋을 쓰게 한다.
-static std::vector<NnUint> gPpLayerOffsets;
+static std::vector<NnUint> gPpLayerOffsets;   // 서브블록 단위(레이어당 2)
 
 void nnNetworkSetPpLayerOffsets(const std::vector<NnUint> &offsets) {
     gPpLayerOffsets = offsets;
 }
 
-static inline NnUint getLayerOwnerPpRank(NnUint layerIndex, NnUint nLayers, NnUint ppSize) {
+// op 이름이 레이어의 어느 서브블록에 속하는가. 0 = att, 1 = ff.
+//
+// 서브레이어 분할에서는 att 가중치(q/k/v/wo, norm_0)와 FFN 가중치(w1/w2/w3, norm_1)가
+// **다른 노드**로 갈 수 있다. 레이어 단위로 판정하면 가중치가 엉뚱한 노드로 간다
+// — research/06 §4.13 에서 이미 한 번 데인 종류의 버그다.
+static inline NnUint subPartOfOp(const char *opName) {
+    if (opName == nullptr)
+        return 0u;
+    if (std::strstr(opName, "matmul_w1") != nullptr ||
+        std::strstr(opName, "matmul_w2") != nullptr ||
+        std::strstr(opName, "matmul_w3") != nullptr ||
+        std::strstr(opName, "moe") != nullptr ||
+        std::strstr(opName, "norm_1") != nullptr)
+        return 1u;
+    return 0u;
+}
+
+static inline NnUint getLayerOwnerPpRank(NnUint layerIndex, NnUint nLayers, NnUint ppSize,
+                                        const char *opName = nullptr) {
     if (ppSize <= 1 || nLayers == 0) return UINT_MAX;
     if (gPpLayerOffsets.size() == (size_t)ppSize + 1u) {
+        const NnUint sub = layerIndex * 2u + subPartOfOp(opName);
         for (NnUint r = 0; r < ppSize; r++) {
-            if (layerIndex >= gPpLayerOffsets[r] && layerIndex < gPpLayerOffsets[r + 1])
+            if (sub >= gPpLayerOffsets[r] && sub < gPpLayerOffsets[r + 1])
                 return r;
         }
         return ppSize - 1;
@@ -2587,7 +2606,7 @@ NnSize NnRootWeightLoader::loadAll(const char *opName, NnUint opIndex, NnSize nB
 NnSize NnRootWeightLoader::loadRowMatmulSlices(const char *opName, const NnUint opIndex, const NnUint expertIndex, NnRowMatmulSlice *slice, NnByte *weight) {
     const NnUint offset = expertIndex * slice->sliceSize.nBytes;
     const NnUint tpSize = slice->nNodes;
-    const NnUint ownerPpRank = getLayerOwnerPpRank(opIndex, nLayers, ppSize);
+    const NnUint ownerPpRank = getLayerOwnerPpRank(opIndex, nLayers, ppSize, opName);
     if (nNodes == 1u) {
         try {
             executor->loadWeight(opName, opIndex, offset, slice->sliceSize.nBytes, weight);
@@ -2619,7 +2638,7 @@ NnSize NnRootWeightLoader::loadRowMatmulSlices(const char *opName, const NnUint 
 NnSize NnRootWeightLoader::loadColMatmulSlices(const char *opName, const NnUint opIndex, const NnUint expertIndex, NnColMatmulSlice *slice, NnByte *weight, NnUint overridePpRank) {
     const NnUint offset = expertIndex * slice->sliceSize.nBytes;
     const NnUint tpSize = slice->nNodes;
-    const NnUint ownerPpRank = (overridePpRank != UINT_MAX) ? overridePpRank : getLayerOwnerPpRank(opIndex, nLayers, ppSize);
+    const NnUint ownerPpRank = (overridePpRank != UINT_MAX) ? overridePpRank : getLayerOwnerPpRank(opIndex, nLayers, ppSize, opName);
     if (nNodes == 1) {
         try {
             executor->loadWeight(opName, opIndex, offset, slice->sliceSize.nBytes, weight);
