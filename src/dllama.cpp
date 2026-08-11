@@ -415,6 +415,7 @@ static void inference(AppInferenceContext *context) {
     const NnUint nPrefillTokens = nInputTokens > 0 ? (NnUint)(nInputTokens - 1) : 0;
     const NnUint prefillBatchCap = resolvePrefillChunkBatchSize(context->args, nPrefillTokens);
     const bool useWave = context->args->wavePipeline && context->args->ppSize > 1;
+    const bool tileAlignedSchedule = context->args->tileAligned;
     const bool prefillUsesSp = context->args->spSize >= 2 && nPrefillTokens >= context->args->spPrefillThreshold;
     const bool useConcurrentPD = context->args->concurrentPrefillDecode && prefillUsesSp;
     if (prefillBatchCap < context->args->nBatches) {
@@ -462,6 +463,30 @@ static void inference(AppInferenceContext *context) {
             ? remainingTokens
             : prefillBatchCap;
 
+        // 비용 인지 마이크로배치 스케줄링 (research/14).
+        //
+        // 커널의 비용 함수 c(B) 는 토큰 수에 선형이 아니라 계단이다.
+        // Q4_0 4행 repack GEMM 이 나머지 행을 gemv 로 처리하기 때문인데,
+        // 이 구조는 llama.cpp 계열의 표준이라 특정 구현의 버그가 아니다.
+        // 실측: c(15) = 335 ms > c(16) = 146 ms — 토큰이 적은데 2.1배다.
+        //
+        // 파이프라인 총시간을 전개하면
+        //     T ~ sum_m c(B_m)  +  (N-1) * c(B_M)
+        // 즉 마지막 마이크로배치만 (N-1)배로 증폭된다. 첫 것은 증폭되지 않는다
+        // — 그 통과 시간은 스테이지 1 이 다음 것을 처리하는 동안 가려진다.
+        //
+        // 규칙: 마지막 마이크로배치를 c(B)/B 최적 크기 B* 로 두고,
+        // 나머지(S mod B*)는 내부 마이크로배치에 흡수시킨다.
+        // 탐색이 필요 없다 — c(B) 를 한 번 재고 나눗셈 두 번이다.
+        if (tileAlignedSchedule && prefillBatchCap > 1u) {
+            const long total = nInputTokens - 1;
+            const NnUint rem = (NnUint)(total % (long)prefillBatchCap);
+            // 나머지를 두 번째 청크에서 소진한다. 첫 청크에 두면 fill 과 겹쳐
+            // 관측이 흐려지고, 마지막에 두면 (N-1)배로 증폭된다.
+            if (rem != 0u && (long)pos == (long)prefillBatchCap)
+                batchSize = rem;
+        }
+
         context->inference->setBatchSize(batchSize);
         context->inference->setPosition(pos);
         for (NnUint i = 0; i < batchSize; i++)
@@ -474,9 +499,14 @@ static void inference(AppInferenceContext *context) {
             const auto wt0 = std::chrono::high_resolution_clock::now();
             context->inference->forwardPrefillNoWait();
             const auto wt1 = std::chrono::high_resolution_clock::now();
-            if (prefillChunkCount < 6)
-                printf("🌊 wave chunk=%u forwardMs=%.1f\n", prefillChunkCount,
-                    std::chrono::duration<double, std::milli>(wt1 - wt0).count());
+            // 시간선 계측: root 도 절대 위치를 남긴다. 인접 스테이지의 send/recv
+            // 대응으로 노드 간 시계를 정렬하려면 양쪽 모두 필요하다.
+            static auto tWave0 = wt0;
+            if (prefillChunkCount == 0) tWave0 = wt0;
+            if (prefillChunkCount < 60)
+                printf("🌊 [R0] mb=%u batch=%u fs=%.1f fe=%.1f\n", prefillChunkCount, batchSize,
+                    std::chrono::duration<double, std::milli>(wt0 - tWave0).count(),
+                    std::chrono::duration<double, std::milli>(wt1 - tWave0).count());
             waveChunkCount++;
         } else {
             context->inference->forward();

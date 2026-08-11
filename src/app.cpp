@@ -451,6 +451,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
     args.cpSplit = false;
+    args.tileAligned = false;
     args.pruneLayer = UINT32_MAX;
     args.pruneKeep = 1.0f;
     args.pplEvalTail = 0;
@@ -625,6 +626,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
                     break;
                 cur = comma + 1;
             }
+        } else if (std::strcmp(name, "--tile-aligned") == 0) {
+            args.tileAligned = atoi(value) == 1;
         } else if (std::strcmp(name, "--prune-layer") == 0) {
             args.pruneLayer = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--prune-keep") == 0) {
@@ -2293,12 +2296,24 @@ void runWorkerApp(AppCliArgs *args) {
                         // 표본을 넉넉히 찍는다. 1개만 보면 노드 간 비교가 노이즈에
                         // 묻힌다 — 실제로 레이어 수 대비 선형성을 판정하려다 기계마다
                         // 부호가 갈리는 결과를 얻었다(research/11 §8).
+                        // 마이크로배치 번호를 함께 찍는다. 꼬리(중앙값 대비 2.3배)가
+                        // 위치와 상관있으면 구조적(파이프라인/attention 증가),
+                        // 무작위면 OS 지터다. 원인에 따라 대응이 완전히 다르다.
+                        // 시간선 계측: 구간 길이가 아니라 **절대 위치**를 찍는다.
+                        // 노드 간 시계는 안 맞지만, 각 노드의 첫 마이크로배치를 원점으로
+                        // 삼으면 그 노드가 언제 놀고 언제 일했는지 재구성할 수 있다.
+                        // 드레인 구간에서 각 스테이지가 실제로 무엇을 하는지 보려면
+                        // 이게 필요하다 — 구간 길이만으로는 대기와 계산을 못 가른다.
                         static int pfN = 0;
-                        if (pfN++ < 40) {
-                            printf("🧩 [WSTAGE] node=%u ppRank=%u batch=%u recv=%.1fms fwd=%.1fms send=%.1fms\n",
-                                nodeConfig.nodeIndex, nodeConfig.ppRank, execution.batchSize,
-                                (tRecv1 - tRecv0) / 1000.0, (tFwd1 - tFwd0) / 1000.0,
-                                (tSend1 - tFwd1) / 1000.0);
+                        static unsigned long long t0Node = 0;
+                        const int mb = pfN++;
+                        if (mb == 0) t0Node = tRecv0;
+                        if (mb < 60) {
+                            printf("🧩 [WSTAGE] node=%u ppRank=%u mb=%d batch=%u "
+                                   "rs=%.1f re=%.1f fe=%.1f se=%.1f\n",
+                                nodeConfig.nodeIndex, nodeConfig.ppRank, mb, execution.batchSize,
+                                (tRecv0 - t0Node) / 1000.0, (tRecv1 - t0Node) / 1000.0,
+                                (tFwd1 - t0Node) / 1000.0, (tSend1 - t0Node) / 1000.0);
                             fflush(stdout);
                         }
                     }

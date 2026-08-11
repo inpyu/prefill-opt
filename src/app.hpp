@@ -100,6 +100,7 @@ public:
     // 파이프라인 처리량은 1/max(스테이지) 이므로, 느린 노드에 레이어를 덜 주면
     // 최대값이 내려간다. 노드 간 개체차/열 상태가 있는 SBC 클러스터에서 특히 유효하다.
     std::vector<NnUint> ppLayerCounts;
+    bool tileAligned;    // 타일 비정렬 청크를 중간에 배치 (research/14)
     NnUint pruneLayer;   // 토큰 가지치기 지점 (UINT32_MAX = 끔)
     float pruneKeep;     // 잔존율
     NnUint pplEvalTail;  // 꼬리 평가 토큰 수 (0 = 끔)
