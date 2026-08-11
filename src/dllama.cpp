@@ -416,6 +416,7 @@ static void inference(AppInferenceContext *context) {
     const NnUint prefillBatchCap = resolvePrefillChunkBatchSize(context->args, nPrefillTokens);
     const bool useWave = context->args->wavePipeline && context->args->ppSize > 1;
     const bool tileAlignedSchedule = context->args->tileAligned;
+    const long ppSizeForSched = (long)context->args->ppSize;
     const bool prefillUsesSp = context->args->spSize >= 2 && nPrefillTokens >= context->args->spPrefillThreshold;
     const bool useConcurrentPD = context->args->concurrentPrefillDecode && prefillUsesSp;
     if (prefillBatchCap < context->args->nBatches) {
@@ -455,42 +456,50 @@ static void inference(AppInferenceContext *context) {
         prefillOpProfilingOn = true;
     }
 
+    // 스케줄 총량. 패딩이 켜지면 타일 배수로 올림한다.
+    const long realTotal = (long)nInputTokens - 1;
+    long schedTotal = realTotal;
+    // 올림 단위는 청크 크기가 아니라 **GEMM 타일 행 수**다.
+    // matmulForward_repack 은 nGemm = rowCount & ~3u 로 4행 단위 GEMM 을 쓰고
+    // 나머지 행만 느린 gemv 로 처리한다. 즉 batchSize % 4 == 0 이면 절벽이 없다.
+    // 청크 크기로 올리면 짧은 프롬프트에서 크게 낭비된다(13토큰 -> 32위치).
+    const long kGemmTileRows = 4;
+    if (tileAlignedSchedule)
+        schedTotal = ((realTotal + kGemmTileRows - 1) / kGemmTileRows) * kGemmTileRows;
+
     for (;;) {
-        long remainingTokens = nInputTokens - 1 - (long)pos;
+        long remainingTokens = schedTotal - (long)pos;
         if (remainingTokens <= 0)
             break;
         NnUint batchSize = remainingTokens < prefillBatchCap
             ? remainingTokens
             : prefillBatchCap;
 
-        // 비용 인지 마이크로배치 스케줄링 (research/14).
+        // 타일 패딩 (research/14).
         //
-        // 커널의 비용 함수 c(B) 는 토큰 수에 선형이 아니라 계단이다.
-        // Q4_0 4행 repack GEMM 이 나머지 행을 gemv 로 처리하기 때문인데,
-        // 이 구조는 llama.cpp 계열의 표준이라 특정 구현의 버그가 아니다.
-        // 실측: c(15) = 335 ms > c(16) = 146 ms — 토큰이 적은데 2.1배다.
+        // 커널의 비용 함수 c(B) 는 GEMM 타일 입자도에 대한 계단이다. Q4_0 4행 repack
+        // GEMM 이 나머지 행을 gemv 로 처리하기 때문이고, llama.cpp 계열의 표준 구조다.
+        // 실측: c(15)=327 ms > c(16)=148 ms — 토큰이 적은데 2.2배.
         //
-        // 파이프라인 총시간을 전개하면
-        //     T ~ sum_m c(B_m)  +  (N-1) * c(B_M)
-        // 즉 마지막 마이크로배치만 (N-1)배로 증폭된다. 첫 것은 증폭되지 않는다
-        // — 그 통과 시간은 스테이지 1 이 다음 것을 처리하는 동안 가려진다.
+        // 파이프라인에서는 이 초과분 e 가 **스테이지 수만큼 누적**된다:
+        //     스테이지 k 완료 = (m+k-1)c + k·e
+        // 앞 스테이지의 지연 위에 자기 초과분이 더해지고 회복되지 않는다.
+        // 실측으로 세 번 확인했다 — 나머지 청크를 마지막/1번/중앙 어디에 둬도
+        // 손실이 N·e ~ 1,100~1,400 ms 로 동일했다. **안전한 위치가 없다.**
         //
-        // 규칙: 마지막 마이크로배치를 c(B)/B 최적 크기 B* 로 두고,
-        // 나머지(S mod B*)는 내부 마이크로배치에 흡수시킨다.
-        // 탐색이 필요 없다 — c(B) 를 한 번 재고 나눗셈 두 번이다.
-        if (tileAlignedSchedule && prefillBatchCap > 1u) {
-            const long total = nInputTokens - 1;
-            const NnUint rem = (NnUint)(total % (long)prefillBatchCap);
-            // 나머지를 두 번째 청크에서 소진한다. 첫 청크에 두면 fill 과 겹쳐
-            // 관측이 흐려지고, 마지막에 두면 (N-1)배로 증폭된다.
-            if (rem != 0u && (long)pos == (long)prefillBatchCap)
-                batchSize = rem;
-        }
-
+        // 유일한 해법은 비정렬을 없애는 것이다. S=447 은 3x149 라 16 근처 어떤 B 로도
+        // 나누어떨어지지 않으므로, 위치를 패딩해 모든 마이크로배치를 B 배수로 만든다.
+        // 비용은 토큰 ≤ B-1 개(여기선 1개, 0.2%)이고 이득은 N·e (약 20%)다.
+        //
+        // prefill 의 로짓은 쓰이지 않는다(디코드가 마지막 실제 토큰부터 시작한다).
+        // 패딩 위치의 KV 는 디코드 첫 스텝이 덮어쓴다.
         context->inference->setBatchSize(batchSize);
         context->inference->setPosition(pos);
-        for (NnUint i = 0; i < batchSize; i++)
-            context->inference->setToken(i, inputTokens[pos + i]);
+        for (NnUint i = 0; i < batchSize; i++) {
+            // 패딩 위치는 마지막 실제 토큰을 반복해 채운다. 출력은 쓰이지 않는다.
+            const long src = ((long)pos + (long)i < realTotal) ? (long)pos + (long)i : realTotal - 1;
+            context->inference->setToken(i, inputTokens[src]);
+        }
 
         if (useWave) {
             // 겹침 진단: root 가 자기 스테이지(레이어 0..k)만 하는지, 아니면
@@ -529,7 +538,8 @@ static void inference(AppInferenceContext *context) {
         }
 
         pos += batchSize;
-        token = inputTokens[pos];
+        // 패딩 구간에서는 인덱스를 넘어설 수 있으므로 실제 범위로 자른다.
+        token = inputTokens[(long)pos < realTotal ? pos : (NnUint)realTotal];
 
         if (!useWave) {
             NnTrafficBreakdown breakdown;
@@ -569,6 +579,14 @@ static void inference(AppInferenceContext *context) {
     }
 
     // Wave 모드: 파이프라인에 쌓인 logits 수거 (마지막 chunk의 logits를 logitsPipe에 보존)
+    // 패딩으로 pos 가 실제 토큰 수를 넘어섰으면 되돌린다.
+    // 디코드는 실제 마지막 토큰 위치에서 시작해야 하고, 패딩 위치의 KV 는
+    // 디코드 첫 스텝이 덮어쓴다.
+    if ((long)pos > realTotal) {
+        pos = (NnUint)realTotal;
+        token = inputTokens[pos];
+    }
+
     if (useWave && waveChunkCount > 0) {
         context->inference->drainPrefillLogits(waveChunkCount);
         NnTrafficBreakdown breakdown;

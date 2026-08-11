@@ -1102,6 +1102,10 @@ void RootLlmInference::drainPrefillLogits(NnUint nChunks) {
     if (pipeline.get() == nullptr || topology->ppSize <= 1 || nChunks == 0)
         return;
 
+    // 드레인 계측: 각 로짓이 언제 도착하는지 찍는다.
+    // 27개가 즉시 오고 마지막만 오래 걸리면 = 마지막 마이크로배치의 통과 시간.
+    // 조금씩 흘러들어오면 = 파이프라인이 밀려 있던 것. 대응이 완전히 다르다.
+    const auto drain0 = std::chrono::high_resolution_clock::now();
     for (NnUint i = 0; i < nChunks; i++) {
         NnPipelineActivationHeader hdr;
         // 마지막 chunk만 logitsPipe에 보존, 나머지는 덮어써도 무방
@@ -1113,6 +1117,10 @@ void RootLlmInference::drainPrefillLogits(NnUint nChunks) {
         )) {
             throw std::runtime_error("Failed to drain prefill logits from last PP stage");
         }
+        printf("💧 [DRAIN] chunk=%u t=%.1fms\n", i,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - drain0).count());
+        fflush(stdout);
     }
     // loop 종료 시 logitsPipe = 마지막 chunk의 logits
 }
