@@ -451,6 +451,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.prefillSpOnly = true;
     args.spPrefillThreshold = 256;
     args.cpSplit = false;
+    args.autoSchedule = false;
+    args.schedBMin = 16;
     args.tileAligned = false;
     args.pruneLayer = UINT32_MAX;
     args.pruneKeep = 1.0f;
@@ -626,6 +628,10 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
                     break;
                 cur = comma + 1;
             }
+        } else if (std::strcmp(name, "--auto-schedule") == 0) {
+            args.autoSchedule = atoi(value) == 1;
+        } else if (std::strcmp(name, "--sched-bmin") == 0) {
+            args.schedBMin = (unsigned int)atoi(value);
         } else if (std::strcmp(name, "--tile-aligned") == 0) {
             args.tileAligned = atoi(value) == 1;
         } else if (std::strcmp(name, "--prune-layer") == 0) {
@@ -732,6 +738,37 @@ NnUint resolvePrefillChunkBatchSize(const AppCliArgs *args, NnUint nPrefillToken
 
     if (args->prefillChunkSize > 0)
         return std::min(args->nBatches, args->prefillChunkSize);
+
+    if (args->autoSchedule) {
+        // 측정 기반 청크 선택 (research/14).
+        //
+        // 두 제약이 반대 방향으로 작용한다:
+        //   작은 B -> 커널 효율 손해 (B < B_min 이면 토큰당 최대 2배)
+        //   큰 B   -> M = ceil(S/B) 가 줄어 파이프라인 미충전 (M < N 이면 미성립)
+        // 실현 가능 구간은  B_min <= B <= S/N.
+        //
+        // 구간 안에서는 목표 M ~ 8N (스테이지당 8개 in-flight)이 관측과 맞았다.
+        // 그러면 버블이 (N-1)/(M+N-1) ~ 10% 로 떨어지면서, 긴 프롬프트에서
+        // attention 의 KV 재읽기가 B 로 상각된다.
+        //
+        // 실측 최적 B: S=224 -> 16, S=512 -> 16, S=2048 -> 32. 규칙이 셋 다 맞힌다.
+        // (기존 휴리스틱은 프롬프트가 길수록 B 를 줄여 S=2048 에서 1.85배 손해였다)
+        const NnUint bMin = args->schedBMin;
+        NnUint b = nPrefillTokens / (8u * args->ppSize);
+        if (b < bMin)
+            b = bMin;
+        b = (b / 4u) * 4u;                      // GEMM 타일 정렬
+        if (b < 4u)
+            b = 4u;
+        const NnUint bCap = std::max<NnUint>(4u, nPrefillTokens / args->ppSize);
+        if (b > bCap)
+            b = (bCap / 4u) * 4u;               // M >= N 유지
+        if (b < 4u)
+            b = 4u;
+        if (b > args->nBatches)
+            b = args->nBatches;                 // 그래프 배치 폭 상한
+        return b;
+    }
 
     NnUint autoChunk = args->nBatches / args->ppSize;
     if (autoChunk < 1)
