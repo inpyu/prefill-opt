@@ -904,6 +904,8 @@ RootLlmInference::RootLlmInference(
 
 void RootLlmInference::setDecodePhase(bool isDecodePhase) {
     controlPacket.phase = isDecodePhase ? 1u : 0u;
+    if (isDecodePhase)
+        controlPacket.isLastPrefillChunk = 1u;
     executor->setDecodePhase(isDecodePhase);
 }
 
@@ -952,7 +954,13 @@ bool RootLlmInference::getDecodeRecvWaitStats(float *p50Ms, float *p95Ms) const 
     return true;
 }
 
+void RootLlmInference::setLastPrefillChunk(bool isLast) {
+    controlPacket.isLastPrefillChunk = isLast ? 1u : 0u;
+}
+
 void RootLlmInference::setBatchSize(NnUint batchSize) {
+    // 기본은 "보낸다". wave prefill 루프만 중간 청크에서 이를 끈다.
+    controlPacket.isLastPrefillChunk = 1u;
     // MAX_CONTROL_BATCH_POS 는 controlPacket.batchPositions[] 의 길이이고,
     // 그 배열은 positionMode == 1 (setBatchPositions, decode continuous batching)
     // 에서만 쓰인다. prefill 은 setPosition() -> positionMode == 0 이라 위치를
@@ -1017,6 +1025,49 @@ void RootLlmInference::clearSpGroupOverrides() {
     }
 }
 
+
+// DerivePP 실험 1 — 마이크로배치별 첫 op / layer0 attention 분리 (research/16 §7.6)
+//
+// 판정에 필요한 것은 집계값이 아니다. 다음 셋을 갈라야 한다:
+//   firstStep : forward 의 첫 execute step        -> dispatch/wake-up 이면 여기 몰린다
+//   attL0     : layerIndex 0 의 attention 계열     -> forward 경계 직후
+//   attRest   : layerIndex >= 1 의 attention 평균  -> FFN 직후 (steady)
+//
+// attL0 >> attRest 이고 firstStep 이 작으면 "attention 반복 setup" 이 있는 것이고,
+// firstStep 에 몰리면 dispatch 비용이라 경계 signature 로 제어할 수 없다.
+static void dumpChunkDetail(NnExecutor *ex, const char *tag, NnUint pos, NnUint batch) {
+    static const char *on = std::getenv("DLLAMA_DUMP_CHUNK");
+    if (on == nullptr || on[0] != '1')
+        return;
+    static std::vector<const char *> nm(4096);
+    static std::vector<NnUint> ly(4096), us(4096);
+    const NnUint n = ex->getLastForwardStepTimes(nm.data(), ly.data(), us.data(), 4096);
+    if (n == 0)
+        return;
+    NnUint firstStep = us[0];
+    double attL0 = 0.0, attRest = 0.0;
+    NnUint restLayers = 0, lastLayer = 0;
+    bool seen[64] = {false};
+    for (NnUint i = 0; i < n; i++) {
+        if (std::strncmp(nm[i], "block_", 6) != 0)
+            continue;
+        const char *b = nm[i] + 6;
+        // ff 계열 제외 (w1/w2/w3/act/mul/cast_d*/cast_y2/cast_y3/merge_add2)
+        if (std::strstr(b, "w1") || std::strstr(b, "w2") || std::strstr(b, "w3")
+            || std::strcmp(b, "act") == 0 || std::strcmp(b, "mul") == 0
+            || std::strncmp(b, "cast_d", 6) == 0 || std::strncmp(b, "cast_y2", 7) == 0
+            || std::strncmp(b, "cast_y3", 7) == 0 || std::strcmp(b, "merge_add2") == 0)
+            continue;
+        const NnUint l = ly[i];
+        if (l == 0u) attL0 += us[i];
+        else { attRest += us[i]; if (l < 64u && !seen[l]) { seen[l] = true; restLayers++; } }
+        lastLayer = l > lastLayer ? l : lastLayer;
+    }
+    printf("🧩 [CHUNK] %s pos=%u batch=%u firstStep=%uus attL0=%.0fus attRestAvg=%.0fus layers=%u\n",
+        tag, pos, batch, firstStep, attL0,
+        restLayers ? attRest / restLayers : 0.0, lastLayer + 1u);
+}
+
 void RootLlmInference::forward() {
     const unsigned long long t0 = stageTiming ? nowUs() : 0;
     if (network != nullptr) {
@@ -1031,6 +1082,14 @@ void RootLlmInference::forward() {
     }
     executor->forward();
     const unsigned long long tExecDone = stageTiming ? nowUs() : 0;
+    // DLLAMA_DUMP_CHUNK=1: 청크별 attention 시간 (research/16 §7.6c).
+    //
+    // 캘리브레이션에서 layer 0 의 attention 이 나머지의 2배로 나왔다
+    // (8노드 전부, A_start ~ 2*A_steady). 이것이
+    //   (A) forward 마다 cold   -> 목적함수에 N*A_start*M 항이 필요
+    //   (B) 첫 마이크로배치만    -> 무시 가능
+    // 중 무엇인지에 따라 모델이 달라진다. 집계값으로는 구분할 수 없다.
+    dumpChunkDetail(executor, "root", controlPacket.position, controlPacket.batchSize);
     if (pipeline.get() != nullptr && pipeline->shouldSendActivations()) {
         const NnSize payloadBytes = xPipeRowBytes * controlPacket.batchSize;
         if (!pipeline->sendActivation(
@@ -1143,7 +1202,9 @@ void RootLlmInference::drainPrefillLogits(NnUint nChunks) {
     // 27개가 즉시 오고 마지막만 오래 걸리면 = 마지막 마이크로배치의 통과 시간.
     // 조금씩 흘러들어오면 = 파이프라인이 밀려 있던 것. 대응이 완전히 다르다.
     const auto drain0 = std::chrono::high_resolution_clock::now();
-    for (NnUint i = 0; i < nChunks; i++) {
+    // 마지막 청크의 로짓 하나만 온다(중간 청크는 보내지 않는다).
+    (void)nChunks;
+    for (NnUint i = 0; i < 1u; i++) {
         NnPipelineActivationHeader hdr;
         // 마지막 chunk만 logitsPipe에 보존, 나머지는 덮어써도 무방
         if (!pipeline->recvActivation(
@@ -1827,6 +1888,10 @@ void WorkerLlmInference::afterForward() {
         // Root receives from a single upstream producer on the matching lane/rank.
         // Restricting to tpRank=0 prevents multi-sender socket backpressure/deadlock
         // when TP > 1.
+        // prefill 중간 청크는 로짓을 보내지 않는다(데드락 방지, app.hpp 주석 참조).
+        if (!decodePhase && controlPacket.isLastPrefillChunk != 1u)
+            return;
+
         NnSize payloadBytes = logitsPipeRowBytes * execution->batchSize;
         NnByte *payloadPtr = logitsPipe;
         // prefill 에서는 **마지막 행만** 보낸다.
@@ -2326,8 +2391,10 @@ void runWorkerApp(AppCliArgs *args) {
                     const unsigned long long tFwd1 = needsWorkerTokenTiming ? nowUs() : 0;
                     if (args->stageTiming && !inference.shouldSkipForward()) {
                         NnExecutorOpBreakdown opBreakdown;
-                        if (executor.getLastForwardOpBreakdown(&opBreakdown))
+                        if (executor.getLastForwardOpBreakdown(&opBreakdown)) {
                             inference.recordOpTiming(opBreakdown);
+                            dumpChunkDetail(&executor, "worker", 0u, 0u);
+                        }
                     }
                     inference.afterForward();
                     const unsigned long long tSend1 = needsWorkerTokenTiming ? nowUs() : 0;

@@ -1,0 +1,132 @@
+📄 AddBos: 255
+📄 BosId: 128000 (<|begin_of_text|>)
+📄 EosId: 128001 (<|end_of_text|>) 128009 (<|eot_id|>) 
+📄 RegularVocabSize: 128000
+📄 SpecialVocabSize: 256
+💡 Arch: Llama
+💡 HiddenAct: Silu
+💡 Dim: 4096
+💡 HeadDim: 128
+💡 QDim: 4096
+💡 KvDim: 1024
+💡 HiddenDim: 14336
+💡 VocabSize: 128256
+💡 nLayers: 32
+💡 nHeads: 32
+💡 nKvHeads: 8
+💡 SeqLen: 8192
+💡 NormEpsilon: 0.000010
+💡 RopeType: Llama
+💡 RopeTheta: 500000
+📀 RequiredMemory: 3588 MB
+⭕ Socket[0]: connecting to 165.194.19.113:9998 worker
+⭕ Socket[0]: connected
+⭕ Socket[1]: connecting to 165.194.19.166:9998 worker
+⭕ Socket[1]: connected
+⭕ Socket[2]: connecting to 165.194.19.191:9998 worker
+⭕ Socket[2]: connected
+⭕ Network is initialized
+🧠 CPU: neon fp16
+💿 Loading weights...
+💿 Loaded 11/32
+💿 Loaded 12/32
+💿 Loaded 13/32
+💿 Loaded 14/32
+💿 Loaded 15/32
+💿 Loaded 16/32
+💿 Loaded 17/32
+💿 Loaded 18/32
+💿 Loaded 19/32
+💿 Loaded 20/32
+💿 Loaded 21/32
+💿 Loaded 22/32
+💿 Loaded 23/32
+💿 Loaded 24/32
+💿 Loaded 25/32
+💿 Loaded 26/32
+💿 Loaded 27/32
+💿 Loaded 28/32
+💿 Loaded 29/32
+💿 Loaded 30/32
+💿 Loaded 31/32
+💿 Loaded 32/32
+💿 Weights loaded
+🚁 Network is in non-blocking mode
+can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting variance accumulates token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first enough to run language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting variance accumulates over deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting variance accumulates over than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale have become capable enough to run language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used is not. Understanding where the time actually goes is the first requirement for any principled optimization.
+🔷️ Eval 3572 ms Sync  556 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3449 ms Sync  517 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3683 ms Sync  480 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3614 ms Sync  497 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3722 ms Sync  518 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3643 ms Sync  506 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3532 ms Sync  484 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3809 ms Sync  514 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3680 ms Sync  561 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3707 ms Sync  573 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3694 ms Sync  479 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3592 ms Sync  487 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3849 ms Sync  554 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3719 ms Sync  543 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3718 ms Sync  545 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3775 ms Sync  500 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3709 ms Sync  565 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3786 ms Sync  539 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3816 ms Sync  544 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3809 ms Sync  523 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3793 ms Sync  557 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3858 ms Sync  555 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3781 ms Sync  518 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3900 ms Sync  574 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3898 ms Sync  547 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3966 ms Sync  504 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4061 ms Sync  504 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3901 ms Sync  559 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3862 ms Sync  546 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3824 ms Sync  524 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4104 ms Sync  536 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4025 ms Sync  600 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4022 ms Sync  581 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4124 ms Sync  533 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4064 ms Sync  540 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4053 ms Sync  553 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 3933 ms Sync  509 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4309 ms Sync  547 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4118 ms Sync  616 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4215 ms Sync  594 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4227 ms Sync  524 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4181 ms Sync 3225 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4301 ms Sync  545 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4275 ms Sync  524 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4202 ms Sync  586 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4267 ms Sync  544 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4242 ms Sync  531 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4276 ms Sync  545 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4255 ms Sync  562 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4281 ms Sync  569 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4311 ms Sync  526 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4298 ms Sync  546 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4407 ms Sync  538 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4426 ms Sync  533 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4387 ms Sync  543 ms | Sent 27648 kB Recv 38136 kB | (32 tokens)
+🔷️ Eval 4266 ms Sync  498 ms | Sent 25920 kB Recv 35752 kB | (30 tokens)
+🔶 Pred  148 ms Sync   38 ms | Sent   864 kB Recv  1191 kB |  Care
+🔶 Pred  146 ms Sync   28 ms | Sent   864 kB Recv  1191 kB | ful
+🔶 Pred  150 ms Sync   64 ms | Sent   864 kB Recv  1191 kB |  measurement
+🔶 Pred  146 ms Sync   27 ms | Sent   864 kB Recv  1191 kB |  of
+🔶 Pred  141 ms Sync   29 ms | Sent   864 kB Recv  1191 kB |  computation
+
+Evaluation
+   nBatches: 32
+    nTokens: 1790
+   tokens/s: 7.01 (142.55 ms/tok)
+Prediction
+    nTokens: 5
+   tokens/s: 5.42 (184.34 ms/tok)
+WallClock
+   ttftMs: 255396.41
+   wall_prefill_ms: 255208.37
+   wall_decode_ms: 928.11
+   wall_total_ms: 256136.48
+   wall_tpot_ms: 185.62
+   wall_decode_tps: 5.3873
+⭕ Network is closed

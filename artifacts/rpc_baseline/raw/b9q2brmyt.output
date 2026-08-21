@@ -1,0 +1,10 @@
+14:    timeout 20 ssh -o ConnectTimeout=10 ubuntu@$h "pkill -x ggml-rpc-server 2>/dev/null; sleep 1; cd /home/ubuntu/lcpp_rpc && LD_LIBRARY_PATH=. setsid ./ggml-rpc-server --host 0.0.0.0 --port 50052 -t 4 > /home/ubuntu/rpc.log 2>&1 < /dev/null & disown" 2>/dev/null
+--- 수정 확인됨 ---
+클러스터 비어있음
+nodes	P	t/s
+1	447	17.49±0.21
+2	447	7.23±0.07
+4	447	7.22±0.05
+8	447	6.77±0.00
+
+[killed]

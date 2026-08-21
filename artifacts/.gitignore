@@ -1,0 +1,9 @@
+# 상위 .gitignore 가 *.tsv / *.txt / *.log / *.md 를 광범위하게 무시한다.
+# artifacts/ 는 재현성 보관소이므로 원자료가 반드시 추적돼야 한다 —
+# 실제로 pl_*.tsv 를 한 번 유실해 delta_p 산출이 막힌 적이 있다.
+!*.tsv
+!*.txt
+!*.log
+!*.md
+!*.json
+!*.patch

@@ -1,0 +1,91 @@
+📄 AddBos: 255
+📄 BosId: 128000 (<|begin_of_text|>)
+📄 EosId: 128001 (<|end_of_text|>) 128009 (<|eot_id|>) 
+📄 RegularVocabSize: 128000
+📄 SpecialVocabSize: 256
+💡 Arch: Llama
+💡 HiddenAct: Silu
+💡 Dim: 4096
+💡 HeadDim: 128
+💡 QDim: 4096
+💡 KvDim: 1024
+💡 HiddenDim: 14336
+💡 VocabSize: 128256
+💡 nLayers: 32
+💡 nHeads: 32
+💡 nKvHeads: 8
+💡 SeqLen: 8192
+💡 NormEpsilon: 0.000010
+💡 RopeType: Llama
+💡 RopeTheta: 500000
+📀 RequiredMemory: 8281 MB
+🧠 CPU: neon fp16
+💿 Loading weights...
+💿 Loaded 1/32
+💿 Loaded 2/32
+💿 Loaded 3/32
+💿 Loaded 4/32
+💿 Loaded 5/32
+💿 Loaded 6/32
+💿 Loaded 7/32
+💿 Loaded 8/32
+💿 Loaded 9/32
+💿 Loaded 10/32
+💿 Loaded 11/32
+💿 Loaded 12/32
+💿 Loaded 13/32
+💿 Loaded 14/32
+💿 Loaded 15/32
+💿 Loaded 16/32
+💿 Loaded 17/32
+💿 Loaded 18/32
+💿 Loaded 19/32
+💿 Loaded 20/32
+💿 Loaded 21/32
+💿 Loaded 22/32
+💿 Loaded 23/32
+💿 Loaded 24/32
+💿 Loaded 25/32
+💿 Loaded 26/32
+💿 Loaded 27/32
+💿 Loaded 28/32
+💿 Loaded 29/32
+💿 Loaded 30/32
+💿 Loaded 31/32
+💿 Loaded 32/32
+💿 Weights loaded
+is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces
+🔷️ Eval16737 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval16443 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval16248 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval16683 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval16767 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval16947 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval16838 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval17090 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval17156 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval17582 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval17673 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval17730 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval18101 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔷️ Eval18304 ms Sync    0 ms | Sent     0 kB Recv     0 kB | (32 tokens)
+🔶 Pred  664 ms Sync    0 ms | Sent     0 kB Recv     0 kB |  clock
+🔶 Pred  597 ms Sync    0 ms | Sent     0 kB Recv     0 kB |  frequency
+🔶 Pred  591 ms Sync    0 ms | Sent     0 kB Recv     0 kB |  uneven
+🔶 Pred  588 ms Sync    0 ms | Sent     0 kB Recv     0 kB | ly
+🔶 Pred  596 ms Sync    0 ms | Sent     0 kB Recv     0 kB |  across
+
+Evaluation
+   nBatches: 32
+    nTokens: 448
+   tokens/s: 1.86 (536.40 ms/tok)
+Prediction
+    nTokens: 5
+   tokens/s: 1.65 (607.69 ms/tok)
+WallClock
+   ttftMs: 241104.93
+   wall_prefill_ms: 240439.48
+   wall_decode_ms: 3044.74
+   wall_total_ms: 243484.22
+   wall_tpot_ms: 608.95
+   wall_decode_tps: 1.6422

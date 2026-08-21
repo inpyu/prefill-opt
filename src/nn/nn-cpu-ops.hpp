@@ -80,3 +80,5 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType);
 void softmax_F32(float *x, const NnUint size);
 
 #endif
+
+void nnCpuOpsReportAttSkipProbe();

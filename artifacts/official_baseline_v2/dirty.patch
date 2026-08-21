@@ -1,0 +1,813 @@
+diff --git a/artifacts/.gitignore b/artifacts/.gitignore
+new file mode 100644
+index 0000000..4802b03
+--- /dev/null
++++ b/artifacts/.gitignore
+@@ -0,0 +1,9 @@
++# 상위 .gitignore 가 *.tsv / *.txt / *.log / *.md 를 광범위하게 무시한다.
++# artifacts/ 는 재현성 보관소이므로 원자료가 반드시 추적돼야 한다 —
++# 실제로 pl_*.tsv 를 한 번 유실해 delta_p 산출이 막힌 적이 있다.
++!*.tsv
++!*.txt
++!*.log
++!*.md
++!*.json
++!*.patch
+diff --git a/artifacts/README.md b/artifacts/README.md
+new file mode 100644
+index 0000000..3894522
+--- /dev/null
++++ b/artifacts/README.md
+@@ -0,0 +1,11 @@
++# artifacts/
++
++측정 산출물의 불변 보관소. 논문의 모든 수치는 여기의 run-id 를 인용해야 한다.
++
++    bash prefill_bench/snapshot.sh j2_baxis pl_*.tsv /path/to/j2_all.tsv
++
++각 `<run-id>/` 는 `raw/`(원자료), `derived/`, `manifest.json`(git SHA·바이너리 md5),
++`dirty.patch`(커밋 안 된 변경), `hosts.tsv`(코어·governor·주파수·온도),
++`environment.txt`, `checksums.txt` 를 담는다.
++
++**규칙**: 한 번 쓴 run-id 는 수정하지 않는다. 재측정은 새 run-id 로 만든다.
+diff --git a/prefill_bench/snapshot.sh b/prefill_bench/snapshot.sh
+new file mode 100755
+index 0000000..5cb8f73
+--- /dev/null
++++ b/prefill_bench/snapshot.sh
+@@ -0,0 +1,44 @@
++#!/usr/bin/env bash
++# 측정 산출물을 불변 run-id 디렉터리로 고정한다 (reproducibility freeze).
++#
++# 왜 필요한가:
++#   레이어별 캘리브레이션(pl_*.tsv)을 한 번 유실해 delta_p 산출이 막혔다.
++#   "재수집 가능"으로는 부족하다 — 논문 수치가 **정확히 어떤 원자료에서 나왔는지**
++#   재현 가능해야 한다. 클러스터 상태(온도/주파수/바이너리)는 두 번 같지 않다.
++#
++#   bash prefill_bench/snapshot.sh <run-id> <파일...>
++set -euo pipefail
++HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/env.sh"
++
++RUN="${1:?usage: snapshot.sh <run-id> <file...>}"; shift
++DIR="$HERE/../artifacts/$RUN"
++mkdir -p "$DIR/raw" "$DIR/derived"
++
++for f in "$@"; do [ -e "$f" ] && cp -a "$f" "$DIR/raw/"; done
++
++# manifest — 코드 상태를 되돌릴 수 있어야 한다. dirty 면 패치 자체를 남긴다.
++SHA=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo none)
++git -C "$HERE/.." diff HEAD > "$DIR/dirty.patch" 2>/dev/null || true
++[ -s "$DIR/dirty.patch" ] || rm -f "$DIR/dirty.patch"
++cat > "$DIR/manifest.json" <<JSON
++{
++  "run_id": "$RUN",
++  "git_sha": "$SHA",
++  "dirty": $([ -f "$DIR/dirty.patch" ] && echo true || echo false),
++  "binary_md5": "$(md5sum "$HERE/../dllama" 2>/dev/null | awk '{print $1}')",
++  "created_utc": "$(date -u +%FT%TZ)"
++}
++JSON
++
++# 노드 상태 — 주파수 governor 와 온도는 결과를 바꾸므로 함께 남긴다.
++{ echo "host	cores	governor	maxfreq	temp_c"
++  for h in root "${ALL_WORKERS[@]}"; do
++    if [ "$h" = root ]; then C="bash -c"; else C="ssh -o ConnectTimeout=5 ubuntu@$h"; fi
++    $C 'echo -e "$(nproc)\t$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo ?)\t$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo ?)\t$(awk "{printf \"%.1f\", \$1/1000}" /sys/class/thermal/thermal_zone0/temp)"' 2>/dev/null \
++      | sed "s|^|$h\t|" || echo -e "$h\t(unreachable)"
++  done
++} > "$DIR/hosts.tsv"
++
++{ echo "compiler: $(g++ --version | head -1)"; echo "kernel: $(uname -a)"; } > "$DIR/environment.txt"
++( cd "$DIR" && find . -type f ! -name checksums.txt -exec md5sum {} + > checksums.txt )
++echo "고정 완료: artifacts/$RUN  ($(find "$DIR/raw" -type f | wc -l) raw 파일)"
+diff --git a/research/12-findings.md b/research/12-findings.md
+index 6687671..39a2fea 100644
+--- a/research/12-findings.md
++++ b/research/12-findings.md
+@@ -79,6 +79,31 @@
+ - 레이어 1개가 목표 스테이지 시간의 22 % 라 조정 단위가 너무 크다
+ - **다음**: 서브레이어 분할 (`attn | FFN` 경계). FFN 이 레이어 FLOPs 의 81 %
+ 
++### #15 wave 파이프라인의 로짓 역압 데드락 — 긴 프롬프트가 불가능했던 이유
++`--auto-schedule` 을 S=8,192 로 외삽하자 `B=112` 에서 114,772 ms 지점에 `Broken pipe`
++로 죽었다. 처음에는 큰 `B` 가 원인이라고 봤지만, `B=32` 로 낮춰도 같은 프롬프트에서
++똑같이 죽었다 — **`B` 와 무관한 별개 결함**이다.
++
++메모리가 아니었다(8 GB 노드에 6.9 GB 여유). 워커 프로세스도 살아 있었고 워커 로그에
++오류가 없었다. 구조를 보면 데드락이다:
++
++- wave 모드에서 root 는 **모든 마이크로배치를 밀어 넣은 뒤에야** 로짓을 수거한다
++- 그런데 마지막 PP 스테이지는 **매 마이크로배치마다** 로짓을 보낸다
++- S≈7,200 / B=32 → M=225 개 × 513 kB = **115 MB** 가 큐에 쌓인다
++- 소켓 버퍼는 8 MB → 마지막 스테이지가 송신에서 막힘 → 파이프라인 정지
++  → root 의 송신도 막힘 → root 가 드레인 지점에 도달하지 못함
++
++S=447(M=28, 14 MB)에서는 커널 여유분으로 간신히 통과했기 때문에 지금까지 드러나지
++않았다. 짧은 프롬프트만 재던 것이 이 결함을 가려 왔다.
++
++**수정**: 중간 청크의 로짓은 `drainPrefillLogits` 가 어차피 버린다. 제어 패킷에
++`isLastPrefillChunk` 를 추가하고, 마지막 스테이지는 이 플래그가 설 때만 로짓을 보낸다.
++데드락이 사라지고 동시에 불필요한 트래픽 114 MB 가 제거된다.
++
++**교훈**: 스케줄러가 예측한 `B` 는 옳았다. 막은 것은 스케줄링이 아니라 전송 계층의
++역압 설계였다. 스케줄링 규칙을 의심하기 전에 실패 모드를 `B` 축과 `S` 축으로 갈라
++보는 것이 필요했다.
++
+ ## C. 기각된 가설 (전부 실측으로)
+ 
+ | 가설 | 반증 |
+@@ -93,3 +118,5 @@
+ | attention 천장은 점수 행렬 실체화 | 없애도 무변화 (진짜는 쿼리 워킹셋) |
+ | `tpSize=1` 이라 SP 가 깨진다 | PP2 도 `tpSize=1` 인데 정상 |
+ | 노드 간 GEMM 속도 차이 | 마이크로벤치 3 % 이내 동일 |
++| S=8,192 실패는 큰 `B` 때문 | `B=32` 로도 동일하게 실패 (→ #15 로짓 역압) |
++| attention 타일을 정확히 건너뛸 수 있다 (온라인 softmax 의 running max 이용) | 실제 타일 최대값을 상한으로 쓴 **달성 상한**이 S=512 에서 4/1,048,576, S=2048 에서 17/13,762,560 — **0.00 %**. θ=21.5(F32 반올림 경계)가 실제 점수 분포보다 훨씬 보수적이다 |
+diff --git a/research/understand/README.md b/research/understand/README.md
+index ae11df5..b90650e 100644
+--- a/research/understand/README.md
++++ b/research/understand/README.md
+@@ -1,249 +1,43 @@
+-# understand/ — 연구 문서를 읽기 위한 문서
++# understand/ — DerivePP를 읽기 위한 보조 자료
+ 
+-`research/00`~`08` 은 **연구 기록**이다. 시간 순으로 쌓였고, 각 문서는 그때 알던 것을
+-그때의 언어로 쓴다. 처음 읽는 사람에게는 진입점이 없다.
++`research/`의 번호 문서는 시간 순 연구 기록이다. 실험 당시의 가설, 폐기된 설계,
++현재와 다른 수치가 함께 남아 있다. 이 폴더는 처음 읽는 사람이 **현재 논문 흐름**을 따라갈
++수 있게 만드는 보조 자료다.
+ 
+-이 폴더는 그 진입점이다. **새로운 주장이나 측정을 만들지 않는다.**
+-원본 문서를 읽기 위한 지도·대응표·보충 설명만 둔다.
++새로운 실측의 정본은 [16-derivepp.md](../16-derivepp.md)와 그 artifact에 둔다.
++이 폴더는 그 수치의 의미, 수식, 읽는 순서를 설명한다.
+ 
+-| 파일 | 무엇 |
+-|---|---|
+-| `README.md` (여기) | 문서 지도, 읽는 순서, 확정/미확정 구분 |
+-| [01-code-map.md](01-code-map.md) | 개념·용어 → 실제 소스 파일·함수 대응표 |
+-| [02-glossary-extra.md](02-glossary-extra.md) | [08-glossary](../08-glossary.md) 에 **없는** 용어 + 기호표 + 이름 충돌 |
+-| [03-glossary-full.md](03-glossary-full.md) | **상세 용어 사전 (프로젝트 기준)** — 우리가 무엇을 쟀고 무엇을 고쳤나 |
+-| [04-concepts.md](04-concepts.md) | **개념 사전 (원리 기준)** — 개념이 왜 존재하고 무엇인가. 프로젝트 이야기 없이 |
+-| [05-math-attention.md](05-math-attention.md) | **유도**: Q·K·V 분리, `√d`, RoPE, KV 캐시, 부분 병합의 정확성 증명 |
+-| [06-math-pipeline.md](06-math-pipeline.md) | **유도**: 버블 모델, 효율 분해, 입자도, 이종 분할, 병렬성 vs 산술 강도 |
+-| [07-math-measurement.md](07-math-measurement.md) | **유도**: perplexity, 오차 보존, 피크 성능, 실험 설계 |
+-
+-### 05~07 은 왜 따로 있나 (2026-08-11 추가)
+-
+-04 는 **개념의 지도**다 — 폭이 넓고 유도는 요점만 적는다.
+-[09](../09-design-ring-cp.md)~[13](../13-methodology.md) 이 추가되면서
+-**개념 설명으로는 부족하고 유도가 필요해진 지점**이 생겼다.
+-
+-| 새로 필요해진 것 | 어느 원본에서 | 어느 문서로 |
+-|---|---|---|
+-| `속도향상 = MN/(M+N−1)` 은 어디서 나왔나 | [11 §3](../11-results.md) | 06 §2~3 |
+-| `η_balance` 47/65/83 % 는 무엇의 곱인가 | [11 §2](../11-results.md) | 06 §6 |
+-| 왜 N=8 에서 균형화가 실패하나 | [12 #14](../12-findings.md) | 06 §7~8 |
+-| perplexity 가 486배 튄 게 왜 지표 문제인가 | [13 §1](../13-methodology.md) | 07 §1-5 |
+-| 왜 교차 실행이 필요한가 | [13 §2](../13-methodology.md) | 07 §4-2~4 |
+-| 근사의 타깃이 왜 **회전 전** K 여야 하나 | [10 §3-2](../10-design-prune-pipeline.md) | 05 §3-4, 07 §2-2 |
+-| 청크 폭을 바꿔도 결과가 같아야 하는 근거 | [12 #6](../12-findings.md), [13 §1](../13-methodology.md) | 05 §5-1, §5-4 정리 2 |
+-| 왜 `attn\|FFN` 경계가 좋은 절단면인가 | [12 #14](../12-findings.md) | 04 §1-2d, 06 §7 |
+-| `M+N−1` 이 왜 의존 구조만으로 나오나 | [11 §3](../11-results.md) | 06 §2-4 |
+-
+-> **04 는 "무엇이 있는가", 05~07 은 "왜 그 식이 그렇게 생겼는가"다.**
+-> 05~07 은 각자 0부에서 필요한 기반 지식(내적, softmax, 분산, 로그)을 만들고 시작하므로
+-> **04 를 안 읽고 바로 들어가도 된다.**
+-
+-**네 글로서리의 차이 — 목적이 다르다**
+-
+-| | 기준 | 이럴 때 |
+-|---|---|---|
+-| [08-glossary](../08-glossary.md) (원본) | 우리 측정값 | **처음 훑을 때.** 가장 짧다 |
+-| [02-glossary-extra](02-glossary-extra.md) | 08 의 빈칸 | **기호(S, N, k, φ, A_l)나 이름 충돌**을 확인할 때 |
+-| [03-glossary-full](03-glossary-full.md) | **프로젝트** | "이 숫자 어디서 나왔지", "이 발견이 뭐였지" |
+-| [04-concepts.md](04-concepts.md) | **원리** | "**GQA 가 뭐지**", "**왜 배치 32지**", "**LSE merge 가 왜 exact 하지**" |
+-
+-> 03 은 *우리 이야기*, 04 는 *개념 자체*다.
+-> 예: repack 을 03 은 "발견 #4, 3.02× 개선, `nn-repack.cpp`" 로,
+-> 04 는 "메모리 레이아웃이 왜 성능을 바꾸는가, 로드는 1회 추론은 수천 회" 로 다룬다.
+-
+-> **원칙**: 원본 00–08 은 수정하지 않는다. 원본과 여기 내용이 어긋나면 **원본이 정본**이다.
+-> (다만 아래 §4 에 알려진 불일치를 모아 두었다.)
+-
+----
+-
+-## 1. 이 연구가 무엇인가 — 세 문장
+-
+-1. 라즈베리파이 클러스터에서 LLM 의 **첫 응답 시간(TTFT)** 을 줄이려 한다.
+-2. TTFT 는 사실상 **KV 캐시를 만드는 시간**이고, 그 계산은 레이어 방향으로 순차라
+-   노드를 늘려도 잘 안 빨라진다.
+-3. 그래서 **토큰 축으로 나누고**(블록 병렬), 나아가 **깊이 사슬 자체를 절반으로 줄인다**
+-   (상위 레이어 KV 를 x_k 에서 직접 사영).
+-
+-한 문단 버전은 [08-glossary 부록](../08-glossary.md) 에 있다.
+-
+----
+-
+-## 2. 문서 지도
+-
+-문서마다 성격이 다르다. **이 구분을 모르고 읽으면 계획을 결과로 오해한다.**
+-
+-| 문서 | 성격 | 한 줄 | 신뢰도 |
+-|---|---|---|---|
+-| [00-RESEARCH-PLAN](../00-RESEARCH-PLAN.md) | **계획** | 문제 정의, 가설 H1–H5, 논문 클레임 초안, 타겟 학회 | 가설은 **미검증** |
+-| [01-EXP1-cost-breakdown](../01-EXP1-cost-breakdown.md) | **실험 설계** | prefill 비용 4분할 계측 방법과 스윕 절차 | 계측 코드는 적용됨, **스윕은 미실행** |
+-| [02-baseline-dotprod-fix](../02-baseline-dotprod-fix.md) | **측정 결과** | 발견 #1 — `-mtune=native` 가 dotprod 경로를 껐다 | 실측·수정 완료 |
+-| [03-attention-batching](../03-attention-batching.md) | **측정 결과** | 발견 #2 — prefill 이 decode 커널을 재사용해 KV 를 반복 스트리밍 | 실측·수정 완료 |
+-| [04-reading-path](../04-reading-path.md) | **학습 자료** | 선행연구 읽는 순서 (Stage 0–5) | — |
+-| [05-kvcache-ttft-guide](../05-kvcache-ttft-guide.md) | **학습 자료** | KV 캐시가 어떻게 만들어지고 TTFT 를 무엇이 정하는가 | — |
+-| [06-baseline-status](../06-baseline-status.md) | **측정 결과** | 단일 노드 6.9× 누적, llama.cpp 대비 85 %. 운영 사고 기록 | 실측 완료 |
+-| [07-design-block-parallel](../07-design-block-parallel.md) | **설계** | 토큰 축 블록 병렬 알고리즘, Phase A/B/C | **구현 전** |
+-| [08-glossary](../08-glossary.md) | **용어** | 이 프로젝트에서 실제로 쓴 용어 | — |
+-| [09-design-ring-cp](../09-design-ring-cp.md) | **설계** | 균형 인지 2D 타일링(Ring CP). 통합 원리 = 병렬성 vs 산술 강도 | **보류** — 통신량이 PP 의 8배 |
+-| [10-design-prune-pipeline](../10-design-prune-pipeline.md) | **설계 + 결과** | 깊이별 축소 × 온라인 재분할. P0·P1 통과, **P2 실패** | 진행 중 |
+-| [11-results](../11-results.md) | **성과 요약** | 한 장으로 읽는 최종 수치, 스케일링 곡선, 예측 모델 | 실측 완료 |
+-| [12-findings](../12-findings.md) | **발견 목록** | 증상→원인→수정→효과 (#1~#14) + **기각된 가설 10종** | 실측 완료 |
+-| [13-methodology](../13-methodology.md) | **방법론** | 정확성 게이트, 교차 실행, 워밍업 제외, md5 대조 | — |
+-| [refs](../refs.md) | **선행연구** | 경쟁군과 우리와의 간극 | — |
+-
+-> **07 과 09 는 둘 다 "설계"이지만 09 가 07 을 대체한다.**
+-> 07 의 블록 병렬(근사)은 정확도 검증에서 기각됐고, 09 §2 에 그 근거가 있다.
+-> 그리고 09 의 Ring CP 자체도 [11 §7](../11-results.md) 에서 보류됐다.
+-> **읽는 순서는 07 → 09 → 11 이고, 결론은 11 에 있다.**
++## 권장 읽기 순서
+ 
+-### 지금까지의 실제 성과 vs 앞으로의 주장 (2026-08-11 갱신)
+-
+-```
+-확정 (측정으로 뒷받침됨)
+-  ├─ 단일 노드 누적                12   #1~#7.  30.1 s, llama.cpp 의 0.92×
+-  │   ├─ #1 dotprod (-mcpu=native)      6.4×   ← 단일 개선의 대부분
+-  │   ├─ #4 Q4_0 repack                 2.0×
+-  │   └─ #7 attention 쿼리 타일링       16× (B=448 구간)
+-  ├─ 분산 PP                       11   4.39× (본 연구 단일 대비)
+-  │   └─ llama.cpp 단일 대비 3.48×      ← 외부 기준선 대비 수치
+-  ├─ 스케일링 곡선 1/2/4/8          11   §2. 예측 모델과 함께
+-  ├─ 하드웨어 피크 대비 68 %        11   §5. 단일 노드
+-  └─ η_balance 원인 분해            10 §8 + 12 #14
+-
+-미확정 / 기각
+-  ├─ ✘ Ring CP                     11 §7   보류 (통신량 PP 의 8배)
+-  ├─ ✘ TP / SP                     12 #9   사전 결함. 동작하는 축은 PP 뿐
+-  ├─ ✘ 블록 병렬 근사               09 §2   생성이 반복 루프 — 블록 *크기* 부족
+-  ├─ ✘ 단순 노름 기반 가지치기      10 §9   1.08× 얻고 품질 42 % 손실
+-  ├─ ⏳ attention 질량 기반 가지치기 10 §9   다음 후보
+-  ├─ ⏳ 서브레이어 분할 (attn|FFN)   12 #14  입자도 한계 돌파용, 미구현
+-  └─ ⏸ 깊이 분해(공유 저랭크 기저)  08 §4   fit 스크립트만 있음
+-```
+-
+-> **위 확정 항목의 "배수"를 인용할 때는 기준선을 반드시 밝힌다.**
+-> 같은 시스템에서 31× / 4.4× / 3.5× 가 모두 나온다 —
+-> 각각 원본 dllama / 본 연구 단일 / llama.cpp 기준이다.
+-> **논문에서 방어 가능한 것은 외부 기준선(3.5×)뿐이다.**
+-> → [07-math-measurement §3-3](07-math-measurement.md#3-3-속도향상-보고의-함정)
+-
+-> **여전히 유효한 주의**: [11 §2](../11-results.md) 의 각주대로 **세션 간 편차가 10 %** 다.
+-> 배수를 계산할 때 분자와 분모는 **같은 세션**에서 잰 값이어야 한다.
+-
+----
+-
+-## 3. 읽는 순서 — 목적별
+-
+-### (A-0) "LLM 추론 자체를 잘 모른다" — 먼저 여기
+-
+-```
+-04-concepts 1부 → 2부 → 3부   (트랜스포머 → KV 캐시 → 하드웨어)
++```text
++00-overview
++  → 04-concepts
++  → 06-math-pipeline
++  → 07-math-measurement
++  → 11-axis-cert
++  → 16-derivepp
+ ```
+ 
+-원본 문서를 하나도 안 읽어도 되게 썼다. 여기까지 읽으면 아래 (A)가 술술 읽힌다.
+-분산(5부)과 선형대수(7부)는 필요해질 때 돌아오면 된다.
+-
+-### (A-1) "식을 끝까지 따라가고 싶다" — 04 를 읽었거나, 안 읽었어도
+-
+-```
+-05-math-attention   (Q/K/V 가 왜 셋인가, RoPE 는 어떻게 유도되나, KV 캐시)
+-06-math-pipeline    (나눴을 때 시간이 얼마인가 — 11-results 의 모델 유도)
+-07-math-measurement (perplexity, 오차, 실험 설계 — 13-methodology 의 근거)
+-```
+-
+-세 문서 모두 **0부에서 필요한 기반(내적·softmax·분산·로그)을 직접 만들고 시작한다.**
+-순서 의존이 거의 없으니 궁금한 것부터 봐도 된다.
+-
+-- "왜 `√d` 로 나누지", "RoPE 가 왜 회전이지" → **05**
+-- "왜 8노드인데 3.78배지", "입자도가 뭐지" → **06**
+-- "perplexity 가 왜 486배 튀었지", "왜 번갈아 돌리지" → **07**
+-
+-### (A-2) "최신 결과만 빨리" — 15분
+-
+-```
+-11-results (한 장)  →  12-findings (증상→원인 목록)  →  막히면 06-math-pipeline §6
+-```
+-
+-11 의 예측 모델과 `η_balance` 를 이해하려면 06 §2~6 이 필요하다.
+-그 절만 읽어도 11 의 표 전체가 유도된다.
+-
+-### (A) "이 연구가 뭔지 알고 싶다" — 약 1시간
+-
+-```
+-08-glossary 부록(한 문단)  →  08 Part 1~3  →  07 §1  →  00 §0~§1
+-```
+-
+-08 의 Part 1–3(추론 두 단계 / 연산 / 분산)이 나머지 전부의 어휘를 깔아 준다.
+-07 §1 은 **실제로 잰 숫자**라 가장 설득력 있는 진입점이다.
+-막히는 항목이 나오면 [03-glossary-full](03-glossary-full.md) 에서 그 항목만 찾아본다.
+-
+-### (B) "코드를 만지려 한다" — 약 하루
+-
+-```
+-05 Part A (KV 캐시 생성)  →  [01-code-map](01-code-map.md)  →  02, 03, 06
+-→  06 §6 운영 교훈(반드시)  →  prefill_bench/run_one.sh
+-```
+-
+-06 §6 을 건너뛰면 OOM 3종과 디스크 소진을 그대로 다시 겪는다.
+-
+-### (C) "08 §4 수학을 이해하려 한다" — 08 에서 가장 어려운 부분
+-
+-```
+-05 A-2 (왜 순차인가)  →  02-glossary-extra 기호표  →  03-glossary-full Part 4
+-→  prefill_bench/fit_kv_projection.py
+-```
+-
+-03 Part 4 는 08 §4 를 같은 순서로 풀어 쓰되 코드 위치와 수식의 대응을 붙여 두었다.
+-
+-`fit_kv_projection.py` 는 08 §4 를 **그대로 코드로 옮긴 것**이다.
+-수식이 안 잡히면 이 스크립트의 `ls_fit`, `rel_err` 를 먼저 보는 게 빠르다.
+-
+-### (D) "논문을 쓰려 한다"
+-
+-```
+-00 §3 (기여 구조)  →  refs.md  →  04-reading-path Stage 0~5
+-```
+-
+----
+-
+-## 4. 원본 문서 간 알려진 불일치
+-
+-읽다가 헷갈릴 지점만 모았다. **원본을 고치지 않고 여기에 기록한다.**
+-
+-| 항목 | 문서별 값 | 해석 |
+-|---|---|---|
+-| 단일 노드 prefill (S=447) | 07 §1: 37,939 ms / 07 §1(d): 36,740 ms / 08: "36.7초", "37.9초" 혼용 | 측정 회차가 다르다. 07 §1 표는 분산 비교용 회차, §1(d) 는 토큰 길이 스윕 회차 |
+-| lm_head 제한 후 | 06 §2: 32,417 ms | 07 §1 표(37,939)는 **lm_head 제한 이전** 회차로 보인다 — 표끼리 직접 빼지 말 것 |
+-| 배리어 1회 비용 | 07 §4: 16.3 ms / `nn-network.cpp:99` 주석: 43.9 ms | 43.9 ms 는 **poll 수정 전**, 16.3 ms 는 수정 후. 둘 다 맞다 |
+-| **발견 #5 의 문서** | 07 이 `06 §7` 로 링크하지만, 06 §7 은 **다른 버그**(트래픽 요약 무한 출력)다 | 발견 #5(배리어 1 ms sleep)를 서술한 문서는 **없다**. 유일한 근거는 `nn-network.cpp:95~105` 주석 — 배리어 43.9 ms 중 회선은 6.9 ms 뿐이고 37 ms 가 sleep 이었다는 분해가 거기 있다. **06 에 §8 로 승격 필요** |
+-| 노드당 GFLOPS | 00 §1 본문: 30 → 정정 110 | 30 은 dotprod 버그 값. **110 이 정본** ([02](../02-baseline-dotprod-fix.md)) |
+-| 가중치 크기 | 08: 6.3 GB / 07 §5: 6.32 GB | 같은 값 |
+-| **attention 비중** | 03 §1 표: S=1789 에서 **57 %** / 03 §7·05 B-1: **13.3 %** | 57 % 는 **깨진 커널이 만든 인공물**이다. 03 §7 이 "H2 재정정"으로 스스로 뒤집는다. **13.3 % 가 정본** — 03 §1 표만 보고 인용하면 틀린다 |
+-
+-### 2026-08-11 에 추가로 확인된 것
+-
+-| 항목 | 문서별 값 | 해석 |
+-|---|---|---|
+-| **SDOT 1회의 연산 수** | 04-concepts §4-4: "32 MAC = 64 FLOP" / 11 §5: 피크 **307 GOPS** | **04 가 2배 틀렸다.** 128비트에 int8 은 16개뿐이라 **16 MAC = 32 연산**이다. `4코어 × 2.4 GHz × 32 = 307.2 GOPS` 로 11 과 정확히 맞는다. 64 FLOP 을 쓰면 피크가 614 가 되어 달성률이 68 % → 34 % 로 잘못 나온다. **307 이 정본.** 04 에 정정 블록을 달았고 유도는 [07-math §3-1](07-math-measurement.md#3-1-하드웨어-피크-성능-유도) 에 있다 |
+-| **`B_min`** | 04-concepts §3-4: 실측 포화점 **32** / 11 §3: `B_min` = **16** | **서로 다른 것을 재고 있다.** 32 는 "더 키워도 이득 없는 포화점", 16 은 "여기까지 줄여도 효율이 유지되는 하한"이다. 스케일링 모델은 16 을 써야 `M=28` 이 나오고 예측이 실측과 맞는다. **인용할 때 어느 정의인지 밝힐 것** ([06-math §4](06-math-pipeline.md#4-m-은-어디서-오나--b_min-의-유래)) |
+-| **레이어 식** | 04-concepts §1-2(원본): `x_{l+1} = x_l + Attn(x_l) + FFN(x_l)` | **Llama 구조가 아니다.** 그 식은 Attn/FFN 이 **병렬**인 GPT-J·PaLM 계열이다. Llama 는 직렬이라 `x_mid = x_l + Attn(φ(x_l))`, `x_{l+1} = x_mid + FFN(φ(x_mid))` 로 **residual 합류가 레이어당 두 번**이다. 이 차이가 [12 #14](../12-findings.md) 의 `attn\|FFN` 서브레이어 분할이 성립하는 근거(`x_mid` 라는 깨끗한 절단면)이므로 사소하지 않다. 04 §1-2 에 정정 블록을 달고 §1-2d 에 15단계 전개를 추가했다 |
+-| **"토큰 방향 독립"** | 04-concepts §1-2(원본): "토큰 방향 : 서로 독립" | **엄밀히는 틀렸다.** attention 만 예외이고, 그것도 **하삼각(causal) 의존**이다. 정확한 문장은 "attention 을 제외한 모든 연산이 행별 사상이고, attention 은 앞 토큰에만 의존한다"이다. 이 구분이 있어야 **청크 분할이 exact 하다는 정리**(앞 청크 KV 보존 조건)가 나온다 → [05-math 5부](05-math-attention.md#5부-무엇이-병렬-가능한가--행별-사상) |
+-| **블록 로컬 attention 의 안전성** | 04-concepts §6-1(원본): "짧은 프롬프트에서 더 안전" / 09 §2: **생성이 반복 루프** | **04 의 원래 판단이 반증됐다.** 결정 요인은 블록의 *수* 가 아니라 *크기* 다. Star Attention 은 16~32 K 블록, 여기는 56~112 토큰 — 문맥이 남지 않는다. **09 §2 가 정본.** 04 §6-1 에 정정 블록을 달았다 |
+-| **동작하는 분산 축** | 07 §1 표: TP2 1.13× / 12 #9: **TP 는 실행된 적 없음** | `--workers` 가 `Auto PP heuristic` 으로 `ppSize = nNodes` 를 덮어써서, **07 의 모든 "TP" 측정치가 사실 PP 다.** 07 §1 표의 축 이름을 그대로 인용하면 안 된다 |
+-| **단일 노드 prefill** | 07 §1: 37,939 / 06 §2: 32,417 / **11 §1: 30,110** | 회차가 다르다. **최신·정본은 11 의 30,110 ms** 이고, 스케일링 표의 분모가 이 값이다 |
+-
+-> 07 §1 표와 06 §2 표는 **다른 실험 회차**다. 두 표의 숫자를 섞어 비율을 계산하지 말 것.
+-> **11-results 의 표는 같은 세션 교차 측정 3라운드 중앙값**이므로 표 안에서는 비교해도 된다.
+-
+----
+-
+-## 5. 이 폴더를 갱신하는 규칙
+-
+-1. **새 측정값은 여기 쓰지 않는다.** 원본 00–13 에 쓰고, 여기는 포인터만 갱신한다.
+-   05~07 은 **원본의 숫자를 유도·검산할 뿐** 새 숫자를 만들지 않는다.
+-   (검산이 원본과 어긋나면 그것은 **불일치이므로 §4 표에 등재**한다 — 실제로 이렇게 두 건을 찾았다.)
+-2. 원본에 새 문서가 생기면 §2 표에 한 줄 추가한다.
+-2-b. **04 의 서술이 이후 실측으로 뒤집히면 지우지 말고 정정 블록을 단다.**
+-   무엇이 어떻게 틀렸는지가 그 자체로 내용이고, 옛 판단을 인용한 문서가 남아 있기 때문이다.
+-   그리고 §4 표에 등재한다.
+-3. 코드 구조가 바뀌면 [01-code-map](01-code-map.md) 의 줄 번호를 다시 확인한다
+-   (줄 번호는 쉽게 낡는다 — **함수 이름으로 먼저 찾고 줄 번호는 참고로만** 쓸 것).
++| 파일 | 역할 |
++|---|---|
++| [00-overview.md](00-overview.md) | **여기서 시작** — 현재 문제, 논문 메시지, 최종 개발 계획 |
++| [01-code-map.md](01-code-map.md) | 개념과 실제 source/function의 대응 |
++| [02-glossary-extra.md](02-glossary-extra.md) | 기호·이름 충돌·추가 용어 |
++| [03-glossary-full.md](03-glossary-full.md) | 프로젝트에서 쓴 상세 용어와 측정 맥락 |
++| [04-concepts.md](04-concepts.md) | Transformer, KV cache, PP/CP/TP의 원리 |
++| [05-math-attention.md](05-math-attention.md) | attention, RoPE, KV cache, 정확성 유도 |
++| [06-math-pipeline.md](06-math-pipeline.md) | `M`, `N`, `B`, bubble, pipeline 시간 유도 |
++| [07-math-measurement.md](07-math-measurement.md) | warm-up, paired A/B, 정확성·측정 규율 |
++| [08-math-executor-calibration.md](08-math-executor-calibration.md) | kernel sum과 production executor 비용의 차이 |
++| [09-math-planner.md](09-math-planner.md) | completion-vector recurrence와 dominance pruning |
++| [10-calibration-history.md](10-calibration-history.md) | calibration 설계가 바뀐 역사와 제거한 가정 |
++| [11-axis-cert.md](11-axis-cert.md) | **현재 핵심** — paired residual 기반 axis activation과 capacity gate |
++
++## 문서 사용 규칙
++
++1. 이 폴더의 문서는 원자료를 대체하지 않는다. 새 수치는 `research/16-derivepp.md`와
++   run artifact에 먼저 기록한다.
++2. historical 문서의 오래된 설계나 측정값을 인용할 때는 00과 16의 현재 판정으로
++   상태를 확인한다.
++3. 새로운 planner 기능은 먼저 “어떤 축을 활성화하는가”와 “어떤 paired residual 또는
++   구조적 upper bound가 그 결정을 지지하는가”를 적고, 그 다음 구현한다.
+diff --git a/src/app.cpp b/src/app.cpp
+index 56d6050..02522e7 100644
+--- a/src/app.cpp
++++ b/src/app.cpp
+@@ -904,6 +904,8 @@ RootLlmInference::RootLlmInference(
+ 
+ void RootLlmInference::setDecodePhase(bool isDecodePhase) {
+     controlPacket.phase = isDecodePhase ? 1u : 0u;
++    if (isDecodePhase)
++        controlPacket.isLastPrefillChunk = 1u;
+     executor->setDecodePhase(isDecodePhase);
+ }
+ 
+@@ -952,7 +954,13 @@ bool RootLlmInference::getDecodeRecvWaitStats(float *p50Ms, float *p95Ms) const
+     return true;
+ }
+ 
++void RootLlmInference::setLastPrefillChunk(bool isLast) {
++    controlPacket.isLastPrefillChunk = isLast ? 1u : 0u;
++}
++
+ void RootLlmInference::setBatchSize(NnUint batchSize) {
++    // 기본은 "보낸다". wave prefill 루프만 중간 청크에서 이를 끈다.
++    controlPacket.isLastPrefillChunk = 1u;
+     // MAX_CONTROL_BATCH_POS 는 controlPacket.batchPositions[] 의 길이이고,
+     // 그 배열은 positionMode == 1 (setBatchPositions, decode continuous batching)
+     // 에서만 쓰인다. prefill 은 setPosition() -> positionMode == 0 이라 위치를
+@@ -1017,6 +1025,49 @@ void RootLlmInference::clearSpGroupOverrides() {
+     }
+ }
+ 
++
++// DerivePP 실험 1 — 마이크로배치별 첫 op / layer0 attention 분리 (research/16 §7.6)
++//
++// 판정에 필요한 것은 집계값이 아니다. 다음 셋을 갈라야 한다:
++//   firstStep : forward 의 첫 execute step        -> dispatch/wake-up 이면 여기 몰린다
++//   attL0     : layerIndex 0 의 attention 계열     -> forward 경계 직후
++//   attRest   : layerIndex >= 1 의 attention 평균  -> FFN 직후 (steady)
++//
++// attL0 >> attRest 이고 firstStep 이 작으면 "attention 반복 setup" 이 있는 것이고,
++// firstStep 에 몰리면 dispatch 비용이라 경계 signature 로 제어할 수 없다.
++static void dumpChunkDetail(NnExecutor *ex, const char *tag, NnUint pos, NnUint batch) {
++    static const char *on = std::getenv("DLLAMA_DUMP_CHUNK");
++    if (on == nullptr || on[0] != '1')
++        return;
++    static std::vector<const char *> nm(4096);
++    static std::vector<NnUint> ly(4096), us(4096);
++    const NnUint n = ex->getLastForwardStepTimes(nm.data(), ly.data(), us.data(), 4096);
++    if (n == 0)
++        return;
++    NnUint firstStep = us[0];
++    double attL0 = 0.0, attRest = 0.0;
++    NnUint restLayers = 0, lastLayer = 0;
++    bool seen[64] = {false};
++    for (NnUint i = 0; i < n; i++) {
++        if (std::strncmp(nm[i], "block_", 6) != 0)
++            continue;
++        const char *b = nm[i] + 6;
++        // ff 계열 제외 (w1/w2/w3/act/mul/cast_d*/cast_y2/cast_y3/merge_add2)
++        if (std::strstr(b, "w1") || std::strstr(b, "w2") || std::strstr(b, "w3")
++            || std::strcmp(b, "act") == 0 || std::strcmp(b, "mul") == 0
++            || std::strncmp(b, "cast_d", 6) == 0 || std::strncmp(b, "cast_y2", 7) == 0
++            || std::strncmp(b, "cast_y3", 7) == 0 || std::strcmp(b, "merge_add2") == 0)
++            continue;
++        const NnUint l = ly[i];
++        if (l == 0u) attL0 += us[i];
++        else { attRest += us[i]; if (l < 64u && !seen[l]) { seen[l] = true; restLayers++; } }
++        lastLayer = l > lastLayer ? l : lastLayer;
++    }
++    printf("🧩 [CHUNK] %s pos=%u batch=%u firstStep=%uus attL0=%.0fus attRestAvg=%.0fus layers=%u\n",
++        tag, pos, batch, firstStep, attL0,
++        restLayers ? attRest / restLayers : 0.0, lastLayer + 1u);
++}
++
+ void RootLlmInference::forward() {
+     const unsigned long long t0 = stageTiming ? nowUs() : 0;
+     if (network != nullptr) {
+@@ -1031,6 +1082,14 @@ void RootLlmInference::forward() {
+     }
+     executor->forward();
+     const unsigned long long tExecDone = stageTiming ? nowUs() : 0;
++    // DLLAMA_DUMP_CHUNK=1: 청크별 attention 시간 (research/16 §7.6c).
++    //
++    // 캘리브레이션에서 layer 0 의 attention 이 나머지의 2배로 나왔다
++    // (8노드 전부, A_start ~ 2*A_steady). 이것이
++    //   (A) forward 마다 cold   -> 목적함수에 N*A_start*M 항이 필요
++    //   (B) 첫 마이크로배치만    -> 무시 가능
++    // 중 무엇인지에 따라 모델이 달라진다. 집계값으로는 구분할 수 없다.
++    dumpChunkDetail(executor, "root", controlPacket.position, controlPacket.batchSize);
+     if (pipeline.get() != nullptr && pipeline->shouldSendActivations()) {
+         const NnSize payloadBytes = xPipeRowBytes * controlPacket.batchSize;
+         if (!pipeline->sendActivation(
+@@ -1143,7 +1202,9 @@ void RootLlmInference::drainPrefillLogits(NnUint nChunks) {
+     // 27개가 즉시 오고 마지막만 오래 걸리면 = 마지막 마이크로배치의 통과 시간.
+     // 조금씩 흘러들어오면 = 파이프라인이 밀려 있던 것. 대응이 완전히 다르다.
+     const auto drain0 = std::chrono::high_resolution_clock::now();
+-    for (NnUint i = 0; i < nChunks; i++) {
++    // 마지막 청크의 로짓 하나만 온다(중간 청크는 보내지 않는다).
++    (void)nChunks;
++    for (NnUint i = 0; i < 1u; i++) {
+         NnPipelineActivationHeader hdr;
+         // 마지막 chunk만 logitsPipe에 보존, 나머지는 덮어써도 무방
+         if (!pipeline->recvActivation(
+@@ -1827,6 +1888,10 @@ void WorkerLlmInference::afterForward() {
+         // Root receives from a single upstream producer on the matching lane/rank.
+         // Restricting to tpRank=0 prevents multi-sender socket backpressure/deadlock
+         // when TP > 1.
++        // prefill 중간 청크는 로짓을 보내지 않는다(데드락 방지, app.hpp 주석 참조).
++        if (!decodePhase && controlPacket.isLastPrefillChunk != 1u)
++            return;
++
+         NnSize payloadBytes = logitsPipeRowBytes * execution->batchSize;
+         NnByte *payloadPtr = logitsPipe;
+         // prefill 에서는 **마지막 행만** 보낸다.
+@@ -2326,8 +2391,10 @@ void runWorkerApp(AppCliArgs *args) {
+                     const unsigned long long tFwd1 = needsWorkerTokenTiming ? nowUs() : 0;
+                     if (args->stageTiming && !inference.shouldSkipForward()) {
+                         NnExecutorOpBreakdown opBreakdown;
+-                        if (executor.getLastForwardOpBreakdown(&opBreakdown))
++                        if (executor.getLastForwardOpBreakdown(&opBreakdown)) {
+                             inference.recordOpTiming(opBreakdown);
++                            dumpChunkDetail(&executor, "worker", 0u, 0u);
++                        }
+                     }
+                     inference.afterForward();
+                     const unsigned long long tSend1 = needsWorkerTokenTiming ? nowUs() : 0;
+diff --git a/src/app.hpp b/src/app.hpp
+index 823adb7..2343381 100644
+--- a/src/app.hpp
++++ b/src/app.hpp
+@@ -158,6 +158,15 @@ typedef struct {
+     NnUint position;
+     NnUint batchSize; // 0 = stop signal
+     NnUint phase;     // 0 = prefill/eval, 1 = decode/prediction
++    // prefill 에서 이 청크가 마지막인가. 마지막 PP 스테이지는 이 플래그가 설 때만
++    // 로짓을 보낸다.
++    //
++    // 왜 필요한가: wave 모드에서 root 는 모든 청크를 밀어 넣은 뒤에야 로짓을
++    // 수거하는데, 마지막 스테이지는 매 청크마다 보낸다. S=7,200 이면
++    // 225청크 x 513 kB = 115 MB 가 큐에 쌓여 소켓 버퍼(8 MB)를 넘고,
++    // 마지막 스테이지가 송신에서 막혀 파이프라인 전체가 데드락에 빠진다.
++    // 중간 청크의 로짓은 drainPrefillLogits 가 어차피 버린다.
++    NnUint isLastPrefillChunk;
+     NnUint positionMode; // 0 = contiguous (position+i), 1 = explicit batchPositions[i]
+     NnUint tokenOnlyMode; // 0 = full logits, 1 = sampled token id, 2 = top-k logits
+     NnUint topKCount; // active only when tokenOnlyMode == 2
+@@ -242,6 +251,7 @@ public:
+     int sampleTokenAtBatch(Sampler *sampler, NnUint batchIndex);
+     bool getDecodeRecvWaitStats(float *p50Ms, float *p95Ms) const;
+     void setBatchSize(NnUint batchSize);
++    void setLastPrefillChunk(bool isLast);
+     void setPosition(NnUint position);
+     void setBatchPositions(const NnUint *positions, NnUint batchSize);
+     void setToken(NnUint batchIndex, NnUint token);
+diff --git a/src/dllama.cpp b/src/dllama.cpp
+index 1a3a533..ae7cc9c 100644
+--- a/src/dllama.cpp
++++ b/src/dllama.cpp
+@@ -494,6 +494,9 @@ static void inference(AppInferenceContext *context) {
+         // prefill 의 로짓은 쓰이지 않는다(디코드가 마지막 실제 토큰부터 시작한다).
+         // 패딩 위치의 KV 는 디코드 첫 스텝이 덮어쓴다.
+         context->inference->setBatchSize(batchSize);
++        // wave 모드에서만 중간 청크의 로짓 송신을 끈다. 비-wave 경로는 청크마다
++        // 블로킹 forward() 로 로짓을 기다리므로 항상 보내야 한다.
++        context->inference->setLastPrefillChunk(!useWave || (long)pos + (long)batchSize >= schedTotal);
+         context->inference->setPosition(pos);
+         for (NnUint i = 0; i < batchSize; i++) {
+             // 패딩 위치는 마지막 실제 토큰을 반복해 채운다. 출력은 쓰이지 않는다.
+@@ -764,6 +767,7 @@ static void inference(AppInferenceContext *context) {
+         predTotalTimeMs / ((float) nPredTokens));
+     printf("Timing\n");
+     printf("  prefillMs: %3.2f\n", prefillWallUs / 1000.0f);
++    nnCpuOpsReportAttSkipProbe();
+     // EXP-1: H1 판정용. syncWait은 peer 대기(straggler), syncXfer는 실제 바이트 이동.
+     printf(" syncWaitMs: %3.2f\n", prefillSyncWaitUs / 1000.0f);
+     printf(" syncXferMs: %3.2f\n", prefillSyncXferUs / 1000.0f);
+diff --git a/src/nn/nn-cpu-ops.cpp b/src/nn/nn-cpu-ops.cpp
+index 05cd791..a1e7b88 100644
+--- a/src/nn/nn-cpu-ops.cpp
++++ b/src/nn/nn-cpu-ops.cpp
+@@ -1046,6 +1046,73 @@ static void multiheadAttBatch_F32(
+ //
+ // 타일 안에서 t 를 바깥 루프로 두는 구조는 기존 커널에서 그대로 가져왔다.
+ // K/V 의 한 위치를 읽어 배치 전체가 재사용하는 것이 이 커널의 핵심 국소성이다.
++// ── 정확 KV 타일 스킵 프로브 (research/15 §8) ──
++//
++// 온라인 소프트맥스는 running max m 을 들고 있다. 어떤 KV 타일의 점수 상한 U 가
++//     U <= m - THETA,   THETA = ln(TILE * 2^24) ~= 21.5
++// 를 만족하면 그 타일의 기여는 F32 누적기의 반올림 아래다. m 은 단조 증가만 하므로
++// 현재 m 으로 판정해도 안전하다(나중에 m 이 커지면 더 무의미해질 뿐).
++//
++// 이 프로브는 **건너뛰지 않고** "건너뛸 수 있었던 타일 수"만 센다. 그리고 상한 U 로
++// 실제 타일 최대값을 쓴다 — 즉 **어떤 상한 추정으로도 넘을 수 없는 스킵률의 상한**이다.
++// 이 값이 0 에 가까우면 이 방향은 그 자리에서 기각된다.
++//
++// DLLAMA_ATT_SKIP_PROBE=1 로 켠다.
++static std::atomic<unsigned long long> gAttTilesTotal(0);
++static std::atomic<unsigned long long> gAttTilesSkippable(0);
++static const float kAttSkipTheta = 21.5f;
++
++static bool attSkipProbeEnabled() {
++    static const bool on = [] {
++        const char *e = std::getenv("DLLAMA_ATT_SKIP_PROBE");
++        return e != nullptr && e[0] == '1';
++    }();
++    return on;
++}
++
++void nnCpuOpsReportAttSkipProbe() {
++    if (!attSkipProbeEnabled())
++        return;
++    const unsigned long long tot = gAttTilesTotal.load();
++    const unsigned long long skp = gAttTilesSkippable.load();
++    if (tot == 0ull)
++        return;
++    printf("🔎 [ATT-SKIP] tiles=%llu skippable=%llu (%.2f%%) theta=%.1f\n",
++        tot, skp, 100.0 * (double)skp / (double)tot, kAttSkipTheta);
++}
++
++
++// ── attention 내부 루프의 레지스터 블로킹 (research/15 §8) ──
++//
++// 기존 구조는 (t, j, b) 조합마다 길이 headDim 내적/axpy 를 1회씩 돌았다.
++// 산술 강도가 8 로드당 4 MAC 이라 F32 피크의 20 % 대에서 막힌다.
++// 4x4 레지스터 타일은 8 로드당 16 MAC 이다.
++//
++// 마이크로벤치(prefill_bench/bench_attn_block.cpp, Cortex-A76 1코어):
++//     QK^T  8.9 -> 16.1 GFLOPS (1.81x)      AV  9.1 -> 15.7 GFLOPS (1.73x)
++//     maxRelDiff = 0.000e+00  (레인별 누적 순서가 같아 비트 단위로 동일)
++// 같은 벤치에서 확인한 부정 결과 두 가지:
++//   · KV 스트라이드(4 kB) 접근의 손해는 4 % 뿐 -> 레이아웃 변환 불필요
++//   · 쿼리를 G 배로 융합해도 1.00x -> t 바깥 루프가 이미 K 재사용을 달성
++//
++// 4x4 에서 멈추는 이유: 누적기 16 + 피연산자 8 = 32 레지스터 중 24 개를 쓴다.
++// 더 키우면 스필한다.
++// 새 코드를 끄는 스위치. 같은 세션에서 교차 측정하려면 필요하다(research/13 §7).
++static bool attBlockDisabled() {
++    static const bool off = [] {
++        const char *e = std::getenv("DLLAMA_ATT_NOBLOCK");
++        return e != nullptr && e[0] == '1';
++    }();
++    return off;
++}
++
++#if defined(__ARM_NEON)
++static inline float horizontalSum_F32(float32x4_t v) {
++    const float32x2_t lo = vadd_f32(vget_low_f32(v), vget_high_f32(v));
++    return vget_lane_f32(lo, 0) + vget_lane_f32(lo, 1);
++}
++#endif
++
+ static void multiheadAttFused_F32(
+     NnByte **outputs,
+     const float *query, const NnUint qSliceD0,
+@@ -1138,6 +1205,18 @@ static void multiheadAttFused_F32(
+             const NnUint t1 = std::min(t0 + TILE, maxPos + 1u);
+ 
+             // (1) 점수. t 를 바깥에 두어 K 의 한 위치를 배치 전체가 재사용한다.
++            //
++            // ⚠️ 4x4 레지스터 블로킹을 시도했다가 되돌렸다.
++            // 마이크로벤치(prefill_bench/bench_attn_block.cpp)에서는 1.81배였는데
++            // (8.9 -> 16.1 GFLOPS/코어, 결과는 비트 단위 동일) in-situ 에서는
++            // 이득이 사라졌다 — S=1789 교차 측정에서 attnMs 39,050(블록) vs
++            // 38,031(기존). 커널 안에서 QK^T 가 차지하는 비중보다 softmax·스크래치
++            // 왕복·온라인 누적 갱신 같은 주변 비용이 커서 FMA 효율 개선이 묻힌다.
++            //
++            // 같은 벤치에서 확인한 부정 결과:
++            //   · KV 4 kB 스트라이드 접근의 손해는 4 % 뿐 -> 레이아웃 변환 불필요
++            //   · 쿼리를 G 배로 융합해도 1.00x -> t 바깥 루프가 이미 K 재사용 달성
++            //   · AV 블록화는 V 타일이 512 kB 로 L2 를 넘겨 1.71배 **악화**
+             for (NnUint t = t0; t < t1; t++) {
+                 const float *posK = &hKc[t * kvDim0];
+                 for (NnUint j = 0; j < nHeadsInGroup; j++) {
+@@ -1184,6 +1263,14 @@ static void multiheadAttFused_F32(
+                     }
+ 
+                     const float mOld = stateM[slot];
++
++                    if (attSkipProbeEnabled()) {
++                        gAttTilesTotal.fetch_add(1ull, std::memory_order_relaxed);
++                        if (mOld != -std::numeric_limits<float>::infinity()
++                            && tileMax <= mOld - kAttSkipTheta)
++                            gAttTilesSkippable.fetch_add(1ull, std::memory_order_relaxed);
++                    }
++
+                     const float mNew = (mOld > tileMax) ? mOld : tileMax;
+                     const float alpha = (mOld == -std::numeric_limits<float>::infinity())
+                         ? 0.0f
+@@ -1262,7 +1349,20 @@ static void multiheadAttFused_F32(
+                 }
+             }
+ 
+-            // (3) o += p * V. 여기서도 t 를 바깥에 두어 V 의 한 위치를 재사용한다.
++            // (3) o += p * V.
++            //
++            // ⚠️ 여기는 블록화하지 않는다. 시도했다가 되돌렸다:
++            // i 를 바깥, t 를 안쪽에 두는 4x4 타일은 i 반복(32회)마다 V 영역을 다시
++            // 훑는데, 실제 kvDim0 = 1024 float = 4 kB 스트라이드라 V 타일이
++            // 128 x 4 kB = 512 kB 로 코어당 L2 를 정확히 넘긴다. 결과는 개선이 아니라
++            // **악화**였다 — S=1789 에서 attnMs 39,263 -> 67,292 ms (1.71배 손해).
++            //
++            // 마이크로벤치에서 이게 안 잡힌 이유는 거기서 V 를 연속(512 B stride)으로
++            // 뒀기 때문이다. 스트라이드를 QK 에만 넣고 AV 에는 안 넣은 벤치 설계 결함이다.
++            // 블록화하려면 V 타일을 연속 스크래치로 팩킹해야 하고, 그 복사 비용을
++            // 따로 재야 한다.
++            //
++            // t 를 바깥에 두면 V 의 한 위치를 배치 전체가 재사용한다.
+             for (NnUint t = t0; t < t1; t++) {
+                 const float *posV = &hVc[t * kvDim0];
+                 for (NnUint j = 0; j < nHeadsInGroup; j++) {
+diff --git a/src/nn/nn-cpu-ops.hpp b/src/nn/nn-cpu-ops.hpp
+index 9a20d44..16b2484 100644
+--- a/src/nn/nn-cpu-ops.hpp
++++ b/src/nn/nn-cpu-ops.hpp
+@@ -79,4 +79,6 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType);
+ 
+ void softmax_F32(float *x, const NnUint size);
+ 
+-#endif
+\ No newline at end of file
++#endif
++
++void nnCpuOpsReportAttSkipProbe();
+diff --git a/src/nn/nn-executor.cpp b/src/nn/nn-executor.cpp
+index fe08ad6..ad510ac 100644
+--- a/src/nn/nn-executor.cpp
++++ b/src/nn/nn-executor.cpp
+@@ -141,6 +141,27 @@ NnExecutor::NnExecutor(NnNetConfig *netConfig, NnNodeConfig *nodeConfig, std::ve
+     steps.shrink_to_fit();
+     stepTimeUs.resize(steps.size(), 0u);
+ 
++    // DerivePP 캘리브레이션용: 실제 step 수를 종류별로 덤프한다(research/16 §7.6).
++    // 정적 카운트는 조건부 op(MoE, prune, TP 변형)를 포함해 부정확하므로
++    // 배리어 횟수 추정에는 이 런타임 값을 쓴다.
++    if (const char *e = std::getenv("DLLAMA_DUMP_STEPS")) {
++        if (e[0] == '1') {
++            NnUint nOp = 0, nSync = 0, nOther = 0;
++            for (const NnExecutorStep &st : steps) {
++                if (st.type == STEP_EXECUTE_OP) nOp++;
++                else if (st.type == STEP_SYNC_NODES) nSync++;
++                else nOther++;
++            }
++            printf("🧮 [STEPS] total=%zu execute_op=%u sync_nodes=%u other=%u\n",
++                steps.size(), nOp, nSync, nOther);
++            for (const NnExecutorStep &st : steps) {
++                if (st.type == STEP_EXECUTE_OP && st.opConfig != nullptr)
++                    printf("     op %s\n", st.opConfig->name);
++            }
++            fflush(stdout);
++        }
++    }
++
+     context.nThreads = netExecution->nThreads;
+     context.synchronizer = synchronizer;
+     context.nSteps = (NnUint)steps.size();
+@@ -465,3 +486,19 @@ bool NnExecutor::getLastForwardOpBreakdown(NnExecutorOpBreakdown *out) const {
+     }
+     return true;
+ }
++NnUint NnExecutor::getLastForwardStepTimes(const char **outName, NnUint *outLayer,
++                                           NnUint *outUs, NnUint maxOut) const {
++    if (stepTimeUs.empty())
++        return 0;
++    NnUint n = 0;
++    for (NnUint i = 0; i < (NnUint)steps.size() && n < maxOut; i++) {
++        if (steps[i].type != STEP_EXECUTE_OP || steps[i].opConfig == nullptr)
++            continue;
++        outName[n] = steps[i].opConfig->name;
++        outLayer[n] = steps[i].opConfig->index;   // layerIndex
++        outUs[n] = stepTimeUs[i];
++        n++;
++    }
++    return n;
++}
++
+diff --git a/src/nn/nn-executor.hpp b/src/nn/nn-executor.hpp
+index b8ca8f1..e88955d 100644
+--- a/src/nn/nn-executor.hpp
++++ b/src/nn/nn-executor.hpp
+@@ -132,6 +132,18 @@ public:
+     NnUint getTotalTime(NnExecutorStepType type);
+     void setStepProfilingEnabled(bool enabled);
+     bool getLastForwardOpBreakdown(NnExecutorOpBreakdown *out) const;
++
++    // 직전 forward 의 **step 별** 시간을 그대로 내준다.
++    //
++    // 캘리브레이션에서 레이어 수 회귀를 없애기 위해 필요하다(research/16 §7.6).
++    // 회귀는 L=1..4 를 서로 다른 시각·온도에서 재므로 시간 드리프트를 레이어 효과로
++    // 오인한다. 한 번의 forward 에서 레이어별 op 시간을 직접 읽으면
++    // 모든 레이어가 **같은 열·메모리 상태**에서 수집되어 그 교란이 사라진다.
++    //
++    // outName/outLayer/outUs 는 nSteps 길이로 채워진다. 반환은 채운 개수.
++    // step profiling 이 꺼져 있으면 0.
++    NnUint getLastForwardStepTimes(const char **outName, NnUint *outLayer,
++                                   NnUint *outUs, NnUint maxOut) const;
+ };
+ 
+ #endif

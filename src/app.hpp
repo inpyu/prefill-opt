@@ -158,6 +158,15 @@ typedef struct {
     NnUint position;
     NnUint batchSize; // 0 = stop signal
     NnUint phase;     // 0 = prefill/eval, 1 = decode/prediction
+    // prefill 에서 이 청크가 마지막인가. 마지막 PP 스테이지는 이 플래그가 설 때만
+    // 로짓을 보낸다.
+    //
+    // 왜 필요한가: wave 모드에서 root 는 모든 청크를 밀어 넣은 뒤에야 로짓을
+    // 수거하는데, 마지막 스테이지는 매 청크마다 보낸다. S=7,200 이면
+    // 225청크 x 513 kB = 115 MB 가 큐에 쌓여 소켓 버퍼(8 MB)를 넘고,
+    // 마지막 스테이지가 송신에서 막혀 파이프라인 전체가 데드락에 빠진다.
+    // 중간 청크의 로짓은 drainPrefillLogits 가 어차피 버린다.
+    NnUint isLastPrefillChunk;
     NnUint positionMode; // 0 = contiguous (position+i), 1 = explicit batchPositions[i]
     NnUint tokenOnlyMode; // 0 = full logits, 1 = sampled token id, 2 = top-k logits
     NnUint topKCount; // active only when tokenOnlyMode == 2
@@ -242,6 +251,7 @@ public:
     int sampleTokenAtBatch(Sampler *sampler, NnUint batchIndex);
     bool getDecodeRecvWaitStats(float *p50Ms, float *p95Ms) const;
     void setBatchSize(NnUint batchSize);
+    void setLastPrefillChunk(bool isLast);
     void setPosition(NnUint position);
     void setBatchPositions(const NnUint *positions, NnUint batchSize);
     void setToken(NnUint batchIndex, NnUint token);

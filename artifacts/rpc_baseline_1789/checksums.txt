@@ -1,0 +1,5 @@
+7876bc7f222c4f0ee3055f07210f9cda  ./dirty.patch
+706da778792f8a9ce086103ec4d18881  ./raw/bxznesa67.output
+b17608f09fa9040665c6c4873da09bc1  ./environment.txt
+895be0bc400ea424cc1ed8ae3478ef9f  ./manifest.json
+c7dee214c25f25b501a17027f7175462  ./hosts.tsv

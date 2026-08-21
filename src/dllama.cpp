@@ -494,6 +494,9 @@ static void inference(AppInferenceContext *context) {
         // prefill 의 로짓은 쓰이지 않는다(디코드가 마지막 실제 토큰부터 시작한다).
         // 패딩 위치의 KV 는 디코드 첫 스텝이 덮어쓴다.
         context->inference->setBatchSize(batchSize);
+        // wave 모드에서만 중간 청크의 로짓 송신을 끈다. 비-wave 경로는 청크마다
+        // 블로킹 forward() 로 로짓을 기다리므로 항상 보내야 한다.
+        context->inference->setLastPrefillChunk(!useWave || (long)pos + (long)batchSize >= schedTotal);
         context->inference->setPosition(pos);
         for (NnUint i = 0; i < batchSize; i++) {
             // 패딩 위치는 마지막 실제 토큰을 반복해 채운다. 출력은 쓰이지 않는다.
@@ -764,6 +767,7 @@ static void inference(AppInferenceContext *context) {
         predTotalTimeMs / ((float) nPredTokens));
     printf("Timing\n");
     printf("  prefillMs: %3.2f\n", prefillWallUs / 1000.0f);
+    nnCpuOpsReportAttSkipProbe();
     // EXP-1: H1 판정용. syncWait은 peer 대기(straggler), syncXfer는 실제 바이트 이동.
     printf(" syncWaitMs: %3.2f\n", prefillSyncWaitUs / 1000.0f);
     printf(" syncXferMs: %3.2f\n", prefillSyncXferUs / 1000.0f);

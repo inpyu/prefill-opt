@@ -1,0 +1,5 @@
+7876bc7f222c4f0ee3055f07210f9cda  ./dirty.patch
+f8cbd01261054ed04bfc0e1a39c75c46  ./raw/results.tsv
+b17608f09fa9040665c6c4873da09bc1  ./environment.txt
+4c16d161ea304e136d2fbb90e1bcda0a  ./manifest.json
+a08e75b7969e5c3e0e934291b011dcd8  ./hosts.tsv

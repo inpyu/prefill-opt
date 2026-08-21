@@ -141,6 +141,27 @@ NnExecutor::NnExecutor(NnNetConfig *netConfig, NnNodeConfig *nodeConfig, std::ve
     steps.shrink_to_fit();
     stepTimeUs.resize(steps.size(), 0u);
 
+    // DerivePP 캘리브레이션용: 실제 step 수를 종류별로 덤프한다(research/16 §7.6).
+    // 정적 카운트는 조건부 op(MoE, prune, TP 변형)를 포함해 부정확하므로
+    // 배리어 횟수 추정에는 이 런타임 값을 쓴다.
+    if (const char *e = std::getenv("DLLAMA_DUMP_STEPS")) {
+        if (e[0] == '1') {
+            NnUint nOp = 0, nSync = 0, nOther = 0;
+            for (const NnExecutorStep &st : steps) {
+                if (st.type == STEP_EXECUTE_OP) nOp++;
+                else if (st.type == STEP_SYNC_NODES) nSync++;
+                else nOther++;
+            }
+            printf("🧮 [STEPS] total=%zu execute_op=%u sync_nodes=%u other=%u\n",
+                steps.size(), nOp, nSync, nOther);
+            for (const NnExecutorStep &st : steps) {
+                if (st.type == STEP_EXECUTE_OP && st.opConfig != nullptr)
+                    printf("     op %s\n", st.opConfig->name);
+            }
+            fflush(stdout);
+        }
+    }
+
     context.nThreads = netExecution->nThreads;
     context.synchronizer = synchronizer;
     context.nSteps = (NnUint)steps.size();
@@ -465,3 +486,19 @@ bool NnExecutor::getLastForwardOpBreakdown(NnExecutorOpBreakdown *out) const {
     }
     return true;
 }
+NnUint NnExecutor::getLastForwardStepTimes(const char **outName, NnUint *outLayer,
+                                           NnUint *outUs, NnUint maxOut) const {
+    if (stepTimeUs.empty())
+        return 0;
+    NnUint n = 0;
+    for (NnUint i = 0; i < (NnUint)steps.size() && n < maxOut; i++) {
+        if (steps[i].type != STEP_EXECUTE_OP || steps[i].opConfig == nullptr)
+            continue;
+        outName[n] = steps[i].opConfig->name;
+        outLayer[n] = steps[i].opConfig->index;   // layerIndex
+        outUs[n] = stepTimeUs[i];
+        n++;
+    }
+    return n;
+}
+

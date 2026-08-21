@@ -1,0 +1,17 @@
+7876bc7f222c4f0ee3055f07210f9cda  ./dirty.patch
+d3c8644fcfd29a1b0b9e69831d64ce8c  ./raw/dg_6.log
+a1583f2c98b981e18dd24ad3eb55629b  ./raw/dg_w_3.log
+a1583f2c98b981e18dd24ad3eb55629b  ./raw/dg_w_2.log
+c53210d1b9769d0b965837e09352a9c3  ./raw/dg_4.log
+d83777ebe923e11ae089c7131a5591f6  ./raw/dg_5.log
+e27c59a7f92427a067e47ec8fa6e93a9  ./raw/dg_1.log
+6f9e28dae7aaf3c223a39a01a4110ad3  ./raw/dg_2.log
+a1583f2c98b981e18dd24ad3eb55629b  ./raw/dg_w_6.log
+a1583f2c98b981e18dd24ad3eb55629b  ./raw/dg_w_1.log
+a1583f2c98b981e18dd24ad3eb55629b  ./raw/dg_w_4.log
+a1583f2c98b981e18dd24ad3eb55629b  ./raw/dg_w_5.log
+847635ccb633b39012bb57ff83a16ede  ./raw/dg_3.log
+a8cf3673f471164eac75e00c22c345bf  ./raw/bms8eb10t.output
+b17608f09fa9040665c6c4873da09bc1  ./environment.txt
+6849f8489f07e5ea4d65d2c633286912  ./manifest.json
+68c16c625bf3859873bb2e946946cf03  ./hosts.tsv

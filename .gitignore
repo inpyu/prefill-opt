@@ -41,3 +41,12 @@ dllama_tokenizer_*.t
 /prompts_gen/*.txt
 /llama.cpp/
 /models/
+
+# 벤치 빌드 산출물 (소스는 prefill_bench/ 에 있다)
+calibrate_perlayer
+membench
+streamcheck
+bench_steps
+calibrate
+calibrate_exec
+calibrate_layer

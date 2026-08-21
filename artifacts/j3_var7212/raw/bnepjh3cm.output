@@ -1,0 +1,8 @@
+22:    --prompt "$(cat prompts_gen/prompt_8192.txt)" > $SC/j3_P0_$r.log 2>&1
+문법 OK
+rep	prefillMs	chunks	temp
+1	190837.59	226	55.1->60.0
+2	206100.12	226	58.4->59.5
+3	206433.48	226	56.2->59.0
+
+[exited with code 0]

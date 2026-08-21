@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" width="880" height="560" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <style>
+    .t   { font-size: 13px; fill: #24292f; }
+    .lbl { font-size: 12px; fill: #57606a; }
+    .hd  { font-size: 14px; font-weight: 600; fill: #24292f; }
+    .sm  { font-size: 11px; fill: #6e7781; }
+    .mono{ font-size: 12px; fill: #24292f; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .box { fill: #f6f8fa; stroke: #d0d7de; rx: 6; }
+    .inb { fill: #ddf4ff; stroke: #54aeff; rx: 6; }
+    .out { fill: #dafbe1; stroke: #4ac26b; rx: 6; }
+    .warn{ fill: #fff8c5; stroke: #d4a72c; rx: 6; }
+    .arw { stroke: #57606a; stroke-width: 1.5; fill: none; marker-end: url(#a); }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+
+  <text x="16" y="24" class="hd">스케줄링 알고리즘 — 무엇을 재고, 무엇을 유도하는가</text>
+
+  <!-- 입력 -->
+  <rect x="16" y="44" width="200" height="96" class="inb"/>
+  <text x="28" y="64" class="t" font-weight="600">입력</text>
+  <text x="28" y="84" class="mono">S   프롬프트 길이</text>
+  <text x="28" y="102" class="mono">N   가용 노드 수</text>
+  <text x="28" y="120" class="mono">B_min  플랫폼 상수</text>
+  <text x="28" y="134" class="sm">← 1회 측정 (Pi5 = 16)</text>
+
+  <rect x="16" y="152" width="200" height="60" class="inb"/>
+  <text x="28" y="172" class="mono">{α_k, β_k}</text>
+  <text x="28" y="190" class="sm">노드 프로파일 (스테이지 실측)</text>
+  <text x="28" y="205" class="sm">← 1회 측정, 클러스터 상수</text>
+
+  <!-- 단계 1 -->
+  <path d="M216 92 L 256 92" class="arw"/>
+  <rect x="260" y="52" width="330" height="80" class="box"/>
+  <text x="274" y="72" class="t" font-weight="600">1. 실현 가능성 검사</text>
+  <text x="274" y="94" class="mono">B_min ≤ S/N  ?</text>
+  <text x="274" y="114" class="mono">아니면  N ← ⌊S / B_min⌋</text>
+  <rect x="606" y="52" width="258" height="80" class="warn"/>
+  <text x="618" y="72" class="sm" font-weight="600">근거</text>
+  <text x="618" y="92" class="sm">S=112 에서 구간 공집합</text>
+  <text x="618" y="110" class="sm">→ 실측 0.82× (단일보다 느림)</text>
+  <text x="618" y="126" class="sm">→ N=4 로 낮추면 1.15×</text>
+
+  <!-- 단계 2 -->
+  <path d="M425 132 L 425 162" class="arw"/>
+  <rect x="260" y="166" width="330" height="86" class="box"/>
+  <text x="274" y="186" class="t" font-weight="600">2. 청크 폭 결정</text>
+  <text x="274" y="208" class="mono">B* = clamp( S/(8N), B_min, S/N )</text>
+  <text x="274" y="228" class="mono">4의 배수로 정렬</text>
+  <text x="274" y="245" class="sm">목표 M ≈ 8N → 버블 ≈ 10 %</text>
+  <rect x="606" y="166" width="258" height="86" class="warn"/>
+  <text x="618" y="186" class="sm" font-weight="600">근거</text>
+  <text x="618" y="206" class="sm">같은 S 에서 B 가 1.85배를 가름</text>
+  <text x="618" y="224" class="sm">관측 최적점 3/3 재현</text>
+  <text x="618" y="242" class="sm">(S=224→16, 512→16, 2048→32)</text>
+
+  <!-- 단계 3 -->
+  <path d="M425 252 L 425 282" class="arw"/>
+  <rect x="260" y="286" width="330" height="80" class="box"/>
+  <text x="274" y="306" class="t" font-weight="600">3. 레이어 배분</text>
+  <text x="274" y="328" class="mono">{L_k} = argmin  max_k (α_k L_k c(B*) + β_k)</text>
+  <text x="274" y="348" class="sm">서브블록(att | ff) 단위 — 레이어보다 세밀</text>
+  <rect x="606" y="286" width="258" height="80" class="warn"/>
+  <text x="618" y="306" class="sm" font-weight="600">근거</text>
+  <text x="618" y="326" class="sm">레이어당 프로파일은 root 를</text>
+  <text x="618" y="344" class="sm">최저 → 최고로 오판한다</text>
+  <text x="618" y="360" class="sm">→ 스테이지 실측이 필요</text>
+
+  <!-- 단계 4 -->
+  <path d="M425 366 L 425 396" class="arw"/>
+  <rect x="260" y="400" width="330" height="70" class="box"/>
+  <text x="274" y="420" class="t" font-weight="600">4. 패딩</text>
+  <text x="274" y="442" class="mono">S 를 4의 배수로 올림</text>
+  <text x="274" y="460" class="sm">비용 ≤ B−1 토큰 (0.2 %)</text>
+  <rect x="606" y="400" width="258" height="70" class="warn"/>
+  <text x="618" y="420" class="sm" font-weight="600">근거</text>
+  <text x="618" y="440" class="sm">비정렬 청크의 초과분 e 가</text>
+  <text x="618" y="458" class="sm">스테이지마다 누적 → N·e (약 20 %)</text>
+
+  <!-- 출력 -->
+  <path d="M425 470 L 425 496" class="arw"/>
+  <rect x="260" y="500" width="330" height="46" class="out"/>
+  <text x="274" y="521" class="t" font-weight="600">출력</text>
+  <text x="274" y="539" class="mono">N*,  B*,  {L_k},  패딩된 S</text>
+
+  <!-- 좌하단: 측정 vs 유도 -->
+  <rect x="16" y="240" width="200" height="200" class="box"/>
+  <text x="28" y="262" class="t" font-weight="600">재는 값 vs 유도되는 값</text>
+  <text x="28" y="286" class="sm" font-weight="600" fill="#1a7f37">측정 (2개)</text>
+  <text x="28" y="304" class="sm">· B_min — 플랫폼 상수</text>
+  <text x="28" y="320" class="sm">· {α_k, β_k} — 클러스터 상수</text>
+  <text x="28" y="346" class="sm" font-weight="600" fill="#0969da">유도 (3개)</text>
+  <text x="28" y="364" class="sm">· 4의 배수 정렬</text>
+  <text x="28" y="380" class="sm">  ← GEMM 타일 구조</text>
+  <text x="28" y="398" class="sm">· M ≈ 8N 목표</text>
+  <text x="28" y="414" class="sm">  ← 버블 공식</text>
+  <text x="28" y="432" class="sm">· N ≤ S/B_min ← 충전 조건</text>
+
+  <text x="16" y="470" class="lbl">다른 CPU 로 이식하면</text>
+  <text x="16" y="490" class="lbl" font-weight="600">B_min 하나만 다시 재면 된다.</text>
+</svg>

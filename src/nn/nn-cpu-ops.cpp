@@ -1046,6 +1046,73 @@ static void multiheadAttBatch_F32(
 //
 // 타일 안에서 t 를 바깥 루프로 두는 구조는 기존 커널에서 그대로 가져왔다.
 // K/V 의 한 위치를 읽어 배치 전체가 재사용하는 것이 이 커널의 핵심 국소성이다.
+// ── 정확 KV 타일 스킵 프로브 (research/15 §8) ──
+//
+// 온라인 소프트맥스는 running max m 을 들고 있다. 어떤 KV 타일의 점수 상한 U 가
+//     U <= m - THETA,   THETA = ln(TILE * 2^24) ~= 21.5
+// 를 만족하면 그 타일의 기여는 F32 누적기의 반올림 아래다. m 은 단조 증가만 하므로
+// 현재 m 으로 판정해도 안전하다(나중에 m 이 커지면 더 무의미해질 뿐).
+//
+// 이 프로브는 **건너뛰지 않고** "건너뛸 수 있었던 타일 수"만 센다. 그리고 상한 U 로
+// 실제 타일 최대값을 쓴다 — 즉 **어떤 상한 추정으로도 넘을 수 없는 스킵률의 상한**이다.
+// 이 값이 0 에 가까우면 이 방향은 그 자리에서 기각된다.
+//
+// DLLAMA_ATT_SKIP_PROBE=1 로 켠다.
+static std::atomic<unsigned long long> gAttTilesTotal(0);
+static std::atomic<unsigned long long> gAttTilesSkippable(0);
+static const float kAttSkipTheta = 21.5f;
+
+static bool attSkipProbeEnabled() {
+    static const bool on = [] {
+        const char *e = std::getenv("DLLAMA_ATT_SKIP_PROBE");
+        return e != nullptr && e[0] == '1';
+    }();
+    return on;
+}
+
+void nnCpuOpsReportAttSkipProbe() {
+    if (!attSkipProbeEnabled())
+        return;
+    const unsigned long long tot = gAttTilesTotal.load();
+    const unsigned long long skp = gAttTilesSkippable.load();
+    if (tot == 0ull)
+        return;
+    printf("🔎 [ATT-SKIP] tiles=%llu skippable=%llu (%.2f%%) theta=%.1f\n",
+        tot, skp, 100.0 * (double)skp / (double)tot, kAttSkipTheta);
+}
+
+
+// ── attention 내부 루프의 레지스터 블로킹 (research/15 §8) ──
+//
+// 기존 구조는 (t, j, b) 조합마다 길이 headDim 내적/axpy 를 1회씩 돌았다.
+// 산술 강도가 8 로드당 4 MAC 이라 F32 피크의 20 % 대에서 막힌다.
+// 4x4 레지스터 타일은 8 로드당 16 MAC 이다.
+//
+// 마이크로벤치(prefill_bench/bench_attn_block.cpp, Cortex-A76 1코어):
+//     QK^T  8.9 -> 16.1 GFLOPS (1.81x)      AV  9.1 -> 15.7 GFLOPS (1.73x)
+//     maxRelDiff = 0.000e+00  (레인별 누적 순서가 같아 비트 단위로 동일)
+// 같은 벤치에서 확인한 부정 결과 두 가지:
+//   · KV 스트라이드(4 kB) 접근의 손해는 4 % 뿐 -> 레이아웃 변환 불필요
+//   · 쿼리를 G 배로 융합해도 1.00x -> t 바깥 루프가 이미 K 재사용을 달성
+//
+// 4x4 에서 멈추는 이유: 누적기 16 + 피연산자 8 = 32 레지스터 중 24 개를 쓴다.
+// 더 키우면 스필한다.
+// 새 코드를 끄는 스위치. 같은 세션에서 교차 측정하려면 필요하다(research/13 §7).
+static bool attBlockDisabled() {
+    static const bool off = [] {
+        const char *e = std::getenv("DLLAMA_ATT_NOBLOCK");
+        return e != nullptr && e[0] == '1';
+    }();
+    return off;
+}
+
+#if defined(__ARM_NEON)
+static inline float horizontalSum_F32(float32x4_t v) {
+    const float32x2_t lo = vadd_f32(vget_low_f32(v), vget_high_f32(v));
+    return vget_lane_f32(lo, 0) + vget_lane_f32(lo, 1);
+}
+#endif
+
 static void multiheadAttFused_F32(
     NnByte **outputs,
     const float *query, const NnUint qSliceD0,
@@ -1138,6 +1205,18 @@ static void multiheadAttFused_F32(
             const NnUint t1 = std::min(t0 + TILE, maxPos + 1u);
 
             // (1) 점수. t 를 바깥에 두어 K 의 한 위치를 배치 전체가 재사용한다.
+            //
+            // ⚠️ 4x4 레지스터 블로킹을 시도했다가 되돌렸다.
+            // 마이크로벤치(prefill_bench/bench_attn_block.cpp)에서는 1.81배였는데
+            // (8.9 -> 16.1 GFLOPS/코어, 결과는 비트 단위 동일) in-situ 에서는
+            // 이득이 사라졌다 — S=1789 교차 측정에서 attnMs 39,050(블록) vs
+            // 38,031(기존). 커널 안에서 QK^T 가 차지하는 비중보다 softmax·스크래치
+            // 왕복·온라인 누적 갱신 같은 주변 비용이 커서 FMA 효율 개선이 묻힌다.
+            //
+            // 같은 벤치에서 확인한 부정 결과:
+            //   · KV 4 kB 스트라이드 접근의 손해는 4 % 뿐 -> 레이아웃 변환 불필요
+            //   · 쿼리를 G 배로 융합해도 1.00x -> t 바깥 루프가 이미 K 재사용 달성
+            //   · AV 블록화는 V 타일이 512 kB 로 L2 를 넘겨 1.71배 **악화**
             for (NnUint t = t0; t < t1; t++) {
                 const float *posK = &hKc[t * kvDim0];
                 for (NnUint j = 0; j < nHeadsInGroup; j++) {
@@ -1184,6 +1263,14 @@ static void multiheadAttFused_F32(
                     }
 
                     const float mOld = stateM[slot];
+
+                    if (attSkipProbeEnabled()) {
+                        gAttTilesTotal.fetch_add(1ull, std::memory_order_relaxed);
+                        if (mOld != -std::numeric_limits<float>::infinity()
+                            && tileMax <= mOld - kAttSkipTheta)
+                            gAttTilesSkippable.fetch_add(1ull, std::memory_order_relaxed);
+                    }
+
                     const float mNew = (mOld > tileMax) ? mOld : tileMax;
                     const float alpha = (mOld == -std::numeric_limits<float>::infinity())
                         ? 0.0f
@@ -1262,7 +1349,20 @@ static void multiheadAttFused_F32(
                 }
             }
 
-            // (3) o += p * V. 여기서도 t 를 바깥에 두어 V 의 한 위치를 재사용한다.
+            // (3) o += p * V.
+            //
+            // ⚠️ 여기는 블록화하지 않는다. 시도했다가 되돌렸다:
+            // i 를 바깥, t 를 안쪽에 두는 4x4 타일은 i 반복(32회)마다 V 영역을 다시
+            // 훑는데, 실제 kvDim0 = 1024 float = 4 kB 스트라이드라 V 타일이
+            // 128 x 4 kB = 512 kB 로 코어당 L2 를 정확히 넘긴다. 결과는 개선이 아니라
+            // **악화**였다 — S=1789 에서 attnMs 39,263 -> 67,292 ms (1.71배 손해).
+            //
+            // 마이크로벤치에서 이게 안 잡힌 이유는 거기서 V 를 연속(512 B stride)으로
+            // 뒀기 때문이다. 스트라이드를 QK 에만 넣고 AV 에는 안 넣은 벤치 설계 결함이다.
+            // 블록화하려면 V 타일을 연속 스크래치로 팩킹해야 하고, 그 복사 비용을
+            // 따로 재야 한다.
+            //
+            // t 를 바깥에 두면 V 의 한 위치를 배치 전체가 재사용한다.
             for (NnUint t = t0; t < t1; t++) {
                 const float *posV = &hVc[t * kvDim0];
                 for (NnUint j = 0; j < nHeadsInGroup; j++) {

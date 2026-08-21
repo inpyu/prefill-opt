@@ -11,6 +11,7 @@
 | **[11-results.md](11-results.md)** | **성과 요약 — 여기부터 읽으면 된다** |
 | **[12-findings.md](12-findings.md)** | 발견 목록 (#1~#14) + 기각된 가설 |
 | **[13-methodology.md](13-methodology.md)** | 측정 방법론 — 게이트, 교차 실행, 계측 |
+| **[17-weight-compiled-prefill.md](17-weight-compiled-prefill.md)** | **새 연산 연구 계획 — 실제 Q4 weight를 exact CPU 산술 DAG로 컴파일하는 WCEP** |
 | [06-baseline-status.md](06-baseline-status.md) | baseline 원본 기록 (상세 근거) |
 | [09-design-ring-cp.md](09-design-ring-cp.md) | **제안 알고리즘 설계 (최종)** |
 | [07-design-block-parallel.md](07-design-block-parallel.md) | 근사 노선 — 기각됨. 측정·분석은 유효 |

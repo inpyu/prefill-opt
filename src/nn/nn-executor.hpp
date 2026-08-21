@@ -132,6 +132,18 @@ public:
     NnUint getTotalTime(NnExecutorStepType type);
     void setStepProfilingEnabled(bool enabled);
     bool getLastForwardOpBreakdown(NnExecutorOpBreakdown *out) const;
+
+    // 직전 forward 의 **step 별** 시간을 그대로 내준다.
+    //
+    // 캘리브레이션에서 레이어 수 회귀를 없애기 위해 필요하다(research/16 §7.6).
+    // 회귀는 L=1..4 를 서로 다른 시각·온도에서 재므로 시간 드리프트를 레이어 효과로
+    // 오인한다. 한 번의 forward 에서 레이어별 op 시간을 직접 읽으면
+    // 모든 레이어가 **같은 열·메모리 상태**에서 수집되어 그 교란이 사라진다.
+    //
+    // outName/outLayer/outUs 는 nSteps 길이로 채워진다. 반환은 채운 개수.
+    // step profiling 이 꺼져 있으면 0.
+    NnUint getLastForwardStepTimes(const char **outName, NnUint *outLayer,
+                                   NnUint *outUs, NnUint maxOut) const;
 };
 
 #endif
