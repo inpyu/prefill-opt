@@ -1,0 +1,5 @@
+3944a383c194099d4a19d1f66a7e783a  ./dirty.patch
+ef0d4211cea71191f745f128b5d8854f  ./raw/hashes.tsv
+b17608f09fa9040665c6c4873da09bc1  ./environment.txt
+6e4a86a7aabce896e9fdfb61936e24cc  ./manifest.json
+f2488ee8149d3b0d383215224bd96d03  ./hosts.tsv

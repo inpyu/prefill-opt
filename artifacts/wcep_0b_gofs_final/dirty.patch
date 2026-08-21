@@ -1,0 +1,369 @@
+diff --git a/research/17-weight-compiled-prefill.md b/research/17-weight-compiled-prefill.md
+index a49ccc4..6cf7d2b 100644
+--- a/research/17-weight-compiled-prefill.md
++++ b/research/17-weight-compiled-prefill.md
+@@ -138,6 +138,7 @@ Q4×Q8 projection 자체를 더 빠르게 해야 한다.
+ WCEP vs repack 없는 옛 distributed-llama
+ WCEP vs scalar/GEMV fallback
+ WCEP vs 오래된 llama.cpp
++WCEP vs llamafile_sgemm 경로        ← production 이 아니다 (§7.5.1, 2.6배 느림)
+ ```
+ 
+ 필수 비교 대상은 다음이다.
+@@ -564,6 +565,347 @@ kernel speedup r(S,B)
+ 
+ ---
+ 
++## 7.4 사전 gate — 물리적 상한부터 확인한다 (§20 보다 먼저)
++
++Phase 1(weight scanner) 이전에 **더 값싼 반증 경로**가 있다. 각 반나절이며, 하나만
++실패해도 6~10주를 아낀다.
++
++### 7.4.1 Q4 weight traffic (정정)
++
++레이어 하나의 주요 projection parameter 수:
++
++    4096^2 + 2*(4096*1024) + 4096^2 + 3*(4096*14336) = 218,103,808
++
++Q4_0 은 32 weight 마다 `4-bit code 16 B + FP16 scale 2 B = 18 B` 이므로
++
++    218,103,808 * 18/32 ≈ 117 MiB / layer
++    32 layer            ≈ 3.66 GiB
++
++(embedding·lm_head 별도. 전체 `.m` 6.32 GB 와 일관.)
++
++### 7.4.2 산술강도와 machine balance — `B=16` 이 ridge point 근처다
++
++Q4 weight byte 당 이상적 연산량:  `I(B) = 2B / (18/32) ≈ 3.56 B`
++
++| Batch | 이상적 연산강도 |
++|---|---|
++| 4 | 14.2 ops/B |
++| 8 | 28.4 ops/B |
++| **16** | **56.9 ops/B** |
++| 32 | 113.8 ops/B |
++
++machine balance = `330 GOPS / 6.36 GB/s ≈ 51.9 ops/B`
++(6.36 GB/s 는 오늘 affinity·barrier 검증된 4스레드 STREAM 실측, §7.15(e))
++
++- `B=8` — 대역폭 바운드 가능성 큼
++- **`B=16` — ridge point 근처**
++- `B=32` — 연산 바운드 가능성 큼
++
++scale·activation·output traffic 을 넣으면 `B=16` 은 대역폭 쪽으로 더 이동한다.
++**즉 0a 측정은 필수지만, 이 계산만으로 WCEP 를 미리 기각할 근거는 아니다.**
++
++### 7.4.3 기각 조건은 batch 별이며 조건부다
++
++WCEP 가 현재 형태처럼 weight byte 를 줄이지 않고 정수 명령만 줄인다면, 실행이
++대역폭에 완전히 포화된 조건에서는 효과가 거의 없다. 그러나 **단일 `B` 결과로 전체를
++기각하면 안 된다.**
++
++    실용 B ∈ {16,32,64} 전부에서 memory-bound
++      + WCEP 가 weight bytes 를 줄이지 못함
++      → WCEP 기각
++
++    B=16 만 memory-bound 이고 B=32 이상은 compute-bound
++      → B 이동을 포함한 E2E 상한을 계산한 뒤 판단
++
++기각하면 안 되는 경우: ① `B` 최적점이 16→32 로 이동 ② 현재 커널이 STREAM 보다
++낮은 이유가 nibble unpack dependency 나 register stall ③ WCEP 의 packed descriptor
++가 실제 weight traffic 도 줄임.
++
++**판정은 세 증거가 함께 맞을 때만 강하다.**
++
++1. achieved bandwidth 가 application-specific ceiling 에 근접
++2. thread 증가에 따라 연산량이 아니라 bandwidth 와 성능이 같이 포화
++3. CPU clock 또는 정수 instruction 수를 바꿔도 성능이 거의 변하지 않음
++
++`BW_achieved ≈ BW_STREAM` 만으로 판정하지 않는다 — 접근 패턴이 다르고, 4-thread
++STREAM 자체가 비정상적으로 감소한다(9.59 → 6.36 GB/s, §7.15(e)).
++
++### 7.4.4 `g(S)` 는 att share 에서 역산하면 안 된다
++
++§0.3 의 `g ≈ 0.86` 은 `S=448` 한 점이다. 긴 프롬프트에서는 attention core 비중이
++커지므로 `g` 가 떨어진다. 다만 `16-derivepp.md` 의 `att share = 0.68` 에서
++`g = 0.32` 로 역산하면 **틀린다** — att share 안에 Q/K/V·O projection(WCEP 대상)이
++포함돼 있기 때문이다. `0.32` 는 FFN 만 센 보수적 하한이다.
++
++직접 측정해야 한다.
++
++    g(S) = ( T_FFN(S) + T_QKVO(S) ) / T_prefill(S)
++
++동일 계측기의 `ffnMs`, `attnProjMs`, `attnCoreMs` 를 쓴다.
++
++### 7.4.5 사전등록 성공 기준 (데이터 보기 전 확정)
++
++| 지표 | 기준 |
++|---|---|
++| 1차 성공 | 세 길이 **geometric mean ≥ 1.20×** |
++| 안전성 | 어떤 길이에서도 5% 이상 slowdown 없음 |
++| 짧은/중간 | S=447, 1789 각각 ≥ 1.20× 권장 |
++| 긴 길이 | S=7212 는 별도 보고 |
++
++"모든 prompt 길이에서 20%" 로 정의하면 훨씬 엄격하다 — attention core 를 건드리지
++않는 WCEP 가 `S=7212` 에서도 1.20× 를 내려면 projection 가속률이 매우 커야 한다.
++
++### 7.4.6 null 은 histogram-matched 여야 한다
++
++단순 uniform random Q4 는 **약한 대조군**이다. Q4_0 은 16개 값만 가지므로 랜덤에서도
++CSE 가 상당히 작동한다. 네 종류 null 과 비교한다.
++
++1. Uniform Q4
++2. projection 별 nibble histogram 보존 random
++3. tile 별 histogram 보존, 위치만 셔플
++4. 레이어·projection·block scale 분포까지 보존한 shuffled null
++
++핵심 비교값:  `Δ_t = Saving(W_t^real) − median_r Saving(W_{t,r}^null)`
++
++수백만 tile 이므로 **p-value 는 거의 항상 작다. 효과크기를 사전등록한다.**
++
++    절대 weighted µop 절약           ≥ 25%
++    matched-null 대비 추가 절약      ≥ 10 %p
++    layer-cluster bootstrap 95% 하한 ≥ 5 %p
++    template 64~128개 coverage       ≥ 90%
++
++**두 판정을 분리한다.**
++
++    actual ≈ null, 둘 다 빠름  → generic exact mixed kernel.
++                                  "weight-aware" novelty 는 철회
++    actual > null              → WCEP 핵심 가설 지지
++
++### 7.4.7 정확성 gate 는 동일 실행 구성끼리
++
++공식 gate:
++
++    N=1 baseline ↔ N=1 WCEP
++    N=8 baseline ↔ N=8 WCEP
++    (동일 B·thread·partition·node order·compiler flags)
++
++`N=1 vs N=8` 비교는 **baseline invariance audit** 이지 WCEP 통과 조건이 아니다 —
++stage boundary 의 cast·pipe bridge·buffer 표현이 다를 수 있다. 같으면 전역
++bit-identical 주장 가능성이 열리고, 다르면 기존 차이로 기록한다.
++
++단 **Q4×Q8 block 과 GEMM 수준은 분산과 무관하므로 무조건 bit-identical** 이어야 한다.
++
++### 7.4.8 수정된 작업량
++
++| 작업 | 추정 |
++|---|---|
++| 0a~0c 사전 gate | 1일 |
++| weight scanner / null 실험 | 2~4일 |
++| symbolic IR·CSE·verifier | 1~2주 |
++| ISA cost model·합성기 | 1~2주 |
++| microkernel·code generation | 1~2주 |
++| permutation·loader | 1주 |
++| executor·PP 통합·검증 | 1~2주 |
++| **총합** | **약 6~10주** |
++
++§18 의 20~36일은 낙관적이다. Phase 0~1 에서 며칠 안에 기각되는 것이 가장 좋은 실패다.
++
++### 7.4.9 실행 순서
++
++    0a. B별 Q4 GEMM roofline 판정      arithmetic-only WCEP 의 물리적 상한
++    0b. S별 g(S) 직접 측정             필요 kernel speedup 계산
++    0c. 정확성 기준선 audit            공식 gate 확정
++    0d. null 설계·효과크기 사전등록    결과 보기 전 threshold 고정
++    1.  actual-weight scanner          실제 weight vs matched null
++    2.  합성기/커널 구현 여부 결정
++
++---
++
++## 7.5 0a 결과 — roofline 판정: **기각 조건 미충족, 진행 가능**
++
++`prefill_bench/bench_roofline.cpp`, `artifacts/wcep_0a/roofline_repack.tsv`.
++production 과 동일 경로: `block_q4_0x4` × `block_q8_0x4` → `ggml_gemm_q4_0_4x4_q8_0`,
++출력 열 4의 배수 분할, 스레드별 활성화 중복 repack. reps=5, best-of.
++
++### 7.5.1 ⚠️ 커널 오인 — baseline 을 2.6배 낮게 잴 뻔했다
++
++첫 판에서 `llamafile_sgemm` 을 벤치했는데 **production 경로가 아니다.**
++
++| 경로 | 1스레드 GOPS |
++|---|---|
++| `llamafile_sgemm` | 18~27 |
++| **`ggml_gemm_q4_0_4x4_q8_0` (production)** | **65~86** |
++
++2.6배 차이다. §1.2 가 "옛 dequant 경로를 비교 대상으로 삼지 말라" 고 경고했는데
++정확히 그 실수를 할 뻔했다. **§1.2 의 금지 목록에 `llamafile_sgemm` 경로를 추가한다.**
++
++비교 기준을 명시한다:
++
++    ggml_gemm_q4_0_4x4_q8_0  (block_q4_0x4 × block_q8_0x4)
++      + 출력 열 4의 배수 분할
++      + 스레드별 활성화 중복 repack
++
++4스레드 최대 **271~326 GOPS** 로, §1.2 의 "약 330 GFLOPS" 주장이 확인된다.
++
++### 7.5.2 측정 결과
++
++| shape | B | GOPS@4t | BW GB/s | STREAM(6.36) 대비 | 4t/1t |
++|---|---|---|---|---|---|
++| Q/O 4096→4096 | 16 | 274.6 | 5.00 | **79%** | 3.38 |
++| | 32 | 271.3 | 2.55 | 40% | 3.23 |
++| | 64 | 301.0 | 1.51 | 24% | 3.60 |
++| K/V 4096→1024 | 16 | 270.8 | 5.03 | **79%** | 4.05 |
++| | 32 | 288.4 | 2.83 | 44% | 4.07 |
++| Gate/Up 4096→14336 | 16 | 297.5 | 5.39 | **85%** | 3.52 |
++| | 32 | 301.9 | 2.81 | 44% | 3.54 |
++| Down 14336→4096 | 16 | 322.0 | 5.75 | **90%** | 3.75 |
++| | 32 | 326.4 | 2.96 | 47% | 3.81 |
++| | 64 | 325.2 | 1.52 | 24% | 3.82 |
++
++### 7.5.3 세 증거 판정 (§7.4.3)
++
++1. **ceiling 근접도** — `B=16` 은 STREAM 의 **79~90%** 로 경계에 있다.
++   `B=32` 는 40~47%, `B=64` 는 23~25% 로 멀다.
++2. **thread scaling** — `B≥16` 에서 3.2~4.1× 로 잘 확장된다. 대역폭 완전 포화라면
++   꺾여야 하는데 그렇지 않다.
++3. **`B` 에 따른 포화** — `B=16` 에서 275~322 GOPS 도달 후 `B=32,64` 에서 거의
++   오르지 않는다. **연산 자원이 한계**라는 신호다.
++
++**판정: 기각 조건("B ∈ {16,32,64} 전부에서 memory-bound") 미충족.**
++`B=32` 이상은 명확히 연산 바운드이므로 산술 µop 감소가 그대로 이득이 된다.
++**WCEP 는 물리적 상한에서 막히지 않는다 — 진행 가능.**
++
++### 7.5.4 함의 — 최적 `B` 가 이동할 것이다
++
++현재 DerivePP 의 선택 `B=16` 은 대역폭 경계에 있다. WCEP 가 산술을 줄이면 그 지점의
++병목이 대역폭으로 완전히 넘어가므로, **최적 `B` 가 32 쪽으로 이동할 가능성이 크다.**
++§13.3(“새 kernel 은 batch 효율 곡선을 바꾸므로 `B=16` 을 그대로 가져오면 안 된다”)이
++정확히 이 상황이며, 통합 시 `B` 재측정은 선택이 아니라 필수다.
++
++### 7.5.5 부산물 — 작은 배치에서 4스레드가 2스레드보다 느리다
++
++| shape | B=4: 2t → 4t | B=8: 2t → 4t |
++|---|---|---|
++| Q/O | 129.8 → 106.2 | 125.5 → 111.0 |
++| Gate/Up | 127.9 → **97.5** | 134.4 → **98.4** |
++| Down | 134.6 → 105.3 | 137.3 → 105.1 |
++
++`B≤8` 에서 4스레드가 2스레드보다 **20~27% 느리다.** `16-derivepp.md` §7.15(e)의
++STREAM 관측("4스레드 대역폭이 1스레드보다 34% 낮다")과 같은 방향이며, 이 기기의
++메모리 서브시스템이 동시 스트림에 취약하다는 것이 **두 번째로 재현**됐다.
++원인은 여전히 미규명이며 논문 주장으로 올리지 않는다.
++
++---
++
++## 7.6 0b 결과 — `g(S)` 직접 측정과 목표 재보정
++
++`artifacts/wcep_0b/`. 단일 노드, `--stage-timing 1`, wave 끔(op breakdown 은 wave 에서
++집계되지 않는다), `nBatches=32`. warm-up 1 + 본측정 3.
++
++    g(S) = (ffnMs + attnProjMs) / prefillMs        ← attnMs(core)는 WCEP 비대상
++
++### 7.6.1 측정값
++
++**표기 주의: 현재 값은 `g(S; B=32, N=1, 현재 baseline)` 이다.**
++최종 시스템 baseline 은 `N=8, B=16` 이므로 정확한 E2E 예상에는 해당 조건의 `g` 가
++필요하다. 최소한 `B=16` vs `B=32` 의 component share 차이를 확인해야 하며,
++WCEP 가 최적 `B` 를 바꿀 가능성(§7.5.4)이 있으므로 최종 분석은
++
++    E(S,B) = 1 / ( 1 − g(S,B) + g(S,B)/r(S,B) )
++
++형태여야 한다.
++
++| S | g (median, 기본) | g (clean pooled, 보조) | 무한가속 상한 `1/(1−g)` |
++|---|---|---|---|
++| 447 | **0.863** | 0.863 | 7.30× |
++| 1789 | **0.680** | 0.685 | 3.12× |
++| 7212 | **0.439** | 0.439 | 1.78× |
++
++`S=447` 의 0.863 은 §0.3 의 `g ≈ 0.86` 가정과 **정확히 일치**한다.
++
++⚠️ **`g(7212) ≈ 0.32` 은 틀렸다.** `att share = 0.68` 에서 역산한 값인데, att share
++안에 Q/K/V·O projection(WCEP 대상)이 포함돼 있다. 실측은 **0.439** 다(§7.4.4 참조).
++
++### 7.6.2 `S=7212` 의 하드 실링
++
++    1 − g(7212) = 0.561
++      = attnCore/prefill ≈ 53%  +  executor·norm·residual 등 비대상 ≈ 3%
++
++> `S=7212` 에서는 attention core 와 기타 비대상 연산이 약 56% 를 차지하므로,
++> Q4 projection 을 무한히 가속해도 TTFT speedup 은 약 **1.78×** 로 제한된다.
++
++단 이것이 "WCEP 가 긴 입력에서 무의미하다" 는 뜻은 아니다. `r=1.5` 만으로도 약
++**17%** 향상이 예측된다.
++
++### 7.6.3 필요 커널 가속률 — 두 양을 혼동하지 않는다
++
++**틀린 계산:** 길이별로 각각 1.20× 를 내는 `r_S` 의 기하평균 = 1.38×.
++이는 "공통 `r` 로 기하평균 1.20× 를 만드는 값" 이 **아니다.**
++
++**옳은 조건:**
++
++    [ Π_S  1/(1 − g(S) + g(S)/r) ]^(1/3)  ≥  1.20      →   r ≥ 1.334
++
++| 공통 `r` | S=447 | S=1789 | S=7212 | **E2E geo평균** |
++|---|---|---|---|---|
++| 1.30 | 1.249 | 1.186 | 1.113 | 1.181 |
++| 1.33 | 1.273 | 1.203 | 1.122 | 1.198 |
++| **1.34** | 1.280 | 1.208 | 1.125 | **1.203** |
++| 1.40 | 1.327 | 1.241 | 1.144 | 1.235 |
++| 1.50 | 1.404 | 1.293 | 1.172 | 1.286 |
++
++    최소 kernel 목표   약 1.34×
++    안전한 목표        1.40×
++    강한 목표          1.50× 이상
++
++§0.3 의 "커널 1.25× → E2E 1.20×" 는 `g=0.86` 단일값 가정이라 **`S=447` 에서만**
++성립한다. 세 길이 기준으로는 1.34× 가 필요하다.
++
++### 7.6.4 성공 기준은 바꾸지 않는다
++
++"짧은/중간 길이만" 기준으로 완화해도 실익이 없다.
++
++    기준 A (세 길이 geo평균 ≥1.20×)     필요 r = 1.334
++    기준 B (447·1789 각각 ≥1.20×)       필요 r = 1.325
++    차이 0.7% — 개발 난도가 실질적으로 낮아지지 않는다
++
++**따라서 §7.4.5 의 사전등록을 유지하고 구조만 명확히 한다.**
++
++| 층 | 기준 |
++|---|---|
++| Primary | 세 길이 E2E geometric mean ≥ **1.20×** |
++| Secondary | S=447, 1789 각각 ≥ 1.20× |
++| Long-context | S=7212 결과와 Amdahl ceiling(1.78×) 별도 보고 |
++| **Kernel gate** | 주요 projection 가중평균 ≥ **1.35×** |
++| 안전성 | 어떤 길이에서도 5% 이상 slowdown 없음 |
++
++### 7.6.5 Phase 1 진입 기준 상향
++
++Phase 1 scanner 의 예상 projection speedup 진입선을 **≥1.35×** 로 올린다.
++1.30× 예측이면 합성기를 만들지 않고 기각한다 — 위 표에서 1.30× 는 geo평균 1.181×
++로 목표 미달이기 때문이다. (§9.3 kill criterion 2 의 `1.30×` 를 `1.35×` 로 갱신.)
++
++### 7.6.6 `S=1789` 이상치 처리
++
++| rep | prefillMs | ffnMs | attnProjMs | attnCoreMs | g |
++|---|---|---|---|---|---|
++| 1 | 146,725 | 82,806 | 18,443 | 36,094 | 0.690 |
++| 2 | **353,905** | 80,719 | 18,444 | **242,346** | **0.280** |
++| 3 | 143,333 | 79,361 | 18,071 | 37,252 | 0.680 |
++
++rep2 의 `attnCore` 가 정상 회차의 **6.6배**다. `ffnMs`·`attnProjMs` 는 정상이므로
++attention core 만 튀었다.
++
++**처리 방침** — 단순 삭제하지 않는다.
++
++    기본값  전 회차 median            g = 0.680
++    보조값  이상치 제외 pooled        g = 0.685
++    원자료와 제외 사유를 모두 공개하고, 가능하면 정상 회차를 1~2회 추가한다
++
++⚠️ 이 이상치가 OS stall 인지 profiler attribution 오류인지 **확인되지 않았다.**
++`16-derivepp.md` §7.15(f)의 node 113 attention 이상과 원인을 연결해서는 안 된다.
++
++---
++
+ ## 8. Phase 0 — 현재 결과 보존
+ 
+ ### 목적
+@@ -632,7 +974,7 @@ baseline fallback tile 비율
+ 다음 중 하나면 WCEP 핵심 구현을 중단한다.
+ 
+ 1. weighted median 예상 µop 감소가 25% 미만
+-2. FFN 세 projection의 가중 예상 speedup이 1.30× 미만
++2. FFN 세 projection의 가중 예상 speedup이 **1.35× 미만** (§7.6.5 로 상향, 원래 1.30×)
+ 3. 128개 template로 90% tile을 처리하지 못함
+ 4. 대부분 후보가 register 28개를 초과
+ 5. 실제 weight가 random Q4 synthetic baseline과 차이가 없음

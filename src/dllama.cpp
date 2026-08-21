@@ -627,6 +627,24 @@ static void inference(AppInferenceContext *context) {
         activationRxTotalBytes += breakdown.activationRxBytes;
         kvMigrationViolationTotal += breakdown.kvMigrationViolations;
     }
+    // WCEP 0c: prefill 종료 시점의 logits 를 그대로 덤프한다 (research/17 §7.7).
+    //
+    // 왜 필요한가: WCEP 는 bit-identical 을 요구하는데, 그러려면 **현재 baseline 의
+    // 누적 순서까지 포함한 reference** 가 있어야 한다. 정수 내적이 수학적으로 같아도
+    // block scale 적용 순서와 FP32 누적 순서가 바뀌면 bitwise 결과가 달라진다.
+    //
+    // DLLAMA_DUMP_LOGITS=<path> 로 켠다. float32 raw, vocabSize 개.
+    // 성능 경로에 영향이 없도록 prefill 이 끝난 뒤 한 번만 쓴다.
+    if (const char *lp = std::getenv("DLLAMA_DUMP_LOGITS")) {
+        FILE *lf = fopen(lp, "wb");
+        if (lf != nullptr) {
+            fwrite(context->inference->logitsPipe, sizeof(float),
+                   context->header->vocabSize, lf);
+            fclose(lf);
+            printf("  logitsDump: %s (%u floats)\n", lp, context->header->vocabSize);
+        }
+    }
+
 
     prefillWallUs = wallClock.elapsedMicroseconds();
     NnUint prefillEndWallUs = prefillWallUs;
