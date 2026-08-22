@@ -1282,6 +1282,116 @@ ARM SDOT 은 한 명령으로 여러 int8 MAC 을 처리하므로, ADD 가 싸�
 
 ---
 
+## 7.11 Phase 1b-0 — 이론적 lower bound 로 generic kernel 도 종료
+
+1a 가 weight-aware 를 기각한 뒤, 45.7% 라는 큰 symbolic 절약이 ARM 에서 회수되는지를
+**generic exact Q4 kernel** 로 따로 물었다. 가장 값싼 단계인 이론적 명령 수 하한에서
+종료 조건이 나왔다.
+
+### 7.11.1 tile 당 명령 수 (tile = 4 output row × 32 input weight)
+
+**현재 경로** (`ggml_gemm_q4_0_4x4_q8_0`) — `block_q4_0x4` 가 4열을 인터리브 저장하므로
+언팩 없이 SDOT 에 직접 투입한다.
+
+| 항목 | 명령 |
+|---|---|
+| Q4 nibble → int8 확장 | 4 |
+| **SDOT** (128 MAC ÷ 16 MAC/명령) | **8** |
+| Q8 load | 2 |
+| scale(fp16→fp32) + FMA | 2 |
+| **합계** | **16** |
+
+**후보 경로** — 1a 의 symbolic 절약 `256 → 139 ops` 를 SIMD 로 묶는다.
+
+| 항목 | 명령 | 가정 |
+|---|---|---|
+| 덧셈 (139 ops) | 8.7 | **16 lane 에 완벽 패킹** (최선) |
+| descriptor load | 2 | 최소 |
+| TBL/shuffle | 4 | 최소 |
+| reduction + scale | 4 | |
+| **합계** | **18.7** | |
+
+### 7.11.2 판정 — 즉시 종료
+
+    현재 SDOT      16.0 명령
+    후보 최선      18.7 명령
+    비율           0.856x
+    1.35x 기준     11.9 명령 이하 필요
+
+**이상적 lower bound 부터 production SDOT 보다 느리다.** §7.11 사전등록대로
+**1b-1(ISA 측정)과 1b-2(프로토타입)를 수행하지 않는다.**
+
+위 계산은 후보에 최대한 유리하다 — 139 ops 를 16 lane 에 완벽 패킹(실제로는 값별
+그룹 크기가 제각각), descriptor 2개, TBL 4개, dependency chain·spill 무시.
+그럼에도 진다.
+
+### 7.11.3 근본 원인 — 회계가 SDOT 의 융합을 무시했다
+
+WCEP 의 전제는 **"곱셈이 덧셈보다 비싸다"** 였다. ARM SDOT 은 이를 무효화한다.
+
+    SDOT   128 MAC -> 8 명령      (명령당 16 MAC, 곱+누산 융합)
+    후보   139 op  -> 8.7 명령    (명령당 16 op, 최선 가정)
+
+1a 의 `256 → 139` 절약은 **곱과 덧셈을 각각 1 op 로 센 회계**다. SDOT 기준으로는
+128 MAC = 128 op 이고, 후보의 139 op 는 **오히려 많다.** 덧셈으로 바꿔 얻는 이득보다
+벡터 패킹을 잃는 손실이 크다.
+
+§7.10.1 에서 baseline 회계를 고칠 때 이미 이 전제가 드러났고("곱과 덧셈 비용이 같다면
+값 뭉침은 n MAC → n+1 op 로 오히려 손해"), 1b-0 이 그것을 정량화했다.
+
+---
+
+## 7.12 WCEP 계열 종료 — 최종 정리
+
+### 7.12.1 결과
+
+| 단계 | 결과 |
+|---|---|
+| 0a roofline | 통과 — 물리적 상한 아님 (B=32 이상 compute-bound) |
+| 0b `g(S)` | 통과 — 필요 커널 r = 1.334 |
+| 0c 정확성 기준선 | 통과 — gate 확정 |
+| 0d null 사전등록 | 완료 |
+| **1a weight-aware** | **기각** — tile_hist Δ = −0.37 %p (기준 ≥10 %p) |
+| **1b-0 lower bound** | **기각** — 후보 최선 0.856× (기준 ≥1.35×) |
+
+§19 의 go/no-go 표에서 두 항목이 No-go 다.
+
+    실제 weight 가 random 보다 구조적인가?   → 차이 없음
+    current SDOT 보다 빠른가?                → 이론적 하한부터 미달
+
+**§19 대로 WCEP 를 DerivePP 의 새 중심 기여로 만들지 않는다.**
+
+### 7.12.2 논문에서의 위치
+
+    WCEP 전체        appendix 의 preregistered negative result
+    DerivePP         주 기여 유지 (4.57~4.68×)
+
+negative result 로서의 가치는 있다 — **강한 ARM Q4 SDOT baseline 에 대해
+weight-specific 컴파일과 LUT 계열 치환이 왜 이득이 되지 않는지**를 사전등록된
+기준과 matched null 로 보였다.
+
+### 7.12.3 남기는 자산
+
+| | |
+|---|---|
+| `prefill_bench/wcep_scan.cpp` | read-only Q4 weight scanner (헤더 파싱·offset self-test 포함) |
+| `prefill_bench/bench_roofline.cpp` | production 커널 roofline 측정 |
+| `src/dllama.cpp` `DLLAMA_DUMP_LOGITS` | 정확성 reference 덤프 |
+| `artifacts/wcep_0a~1a` | 원자료·manifest·checksum |
+| 무효 결과 2건 | `wcep_1a_invalid_embedding_offset`, `wcep_1a_invalid_ffn_order` |
+
+### 7.12.4 방법론 교훈 (DerivePP 본문에도 적용)
+
+1. **파일 포맷 파서는 검증기를 먼저 쓴다.** 파싱이 맞다는 증거 없이 나온 통계는
+   전부 무의미하다. 세 번의 무효화가 모두 이것 때문이었다.
+2. **byte 크기 self-test 로는 부족하다.** 이름·shape 를 loader 와 대조해야 한다
+   (FFN 세 행렬은 원소 수가 같아 크기 검증을 통과한다).
+3. **효과크기를 사전등록한다.** "45.7% 절약" 은 matched null 없이는 아무 뜻이 없다.
+4. **회계 단위를 baseline 과 맞춘다.** 곱·덧셈을 따로 세면서 baseline 을 MAC 으로
+   세면 최적화가 구조적으로 부풀려진다.
+
+---
+
 ## 8. Phase 0 — 현재 결과 보존
 
 ### 목적
