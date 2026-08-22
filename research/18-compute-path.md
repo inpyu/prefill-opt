@@ -201,6 +201,150 @@ load·nibble unpack 선행, scale 변환과 다음 SDOT overlap, K loop software
 
 ---
 
+## 6c. 교락 분리 — 원인은 K 길이가 아니라 **스레드별 중복 pack**
+
+`artifacts/saedot/dup_vs_shared.tsv`. 같은 조건에서 activation packing 방식만 바꿨다.
+`dup` = production(스레드마다 전체를 자기 스크래치에 변환), `shared` = 하나를 공유.
+
+### K=14336, B=32 스레드별
+
+| threads | dup | shared | 비율 |
+|---|---|---|---|
+| 1 | 84.5 | 84.1 | 1.00 |
+| 2 | 169.8 | 170.9 | 1.01 |
+| 3 | 245.5 | 252.5 | 1.03 |
+| **4** | **198.7** | **333.8** | **1.68** |
+
+### 4스레드, B=32, panel 크기별
+
+| panel KiB | dup | shared | 비율 |
+|---|---|---|---|
+| 68 | 318.4 | 329.6 | 1.04 |
+| 102 | 312.3 | 330.9 | 1.06 |
+| 136 | 305.9 | 327.1 | 1.07 |
+| 170 | 297.5 | 327.4 | 1.10 |
+| 204 | 252.9 | 330.9 | 1.31 |
+| **238** | **198.7** | **333.8** | **1.68** |
+
+### 결론
+
+**`shared` 는 K 와 완전히 무관하다** — 68 KiB 부터 238 KiB 까지 327~334 GOPS 로 평탄하다.
+`dup` 만 panel 크기에 따라 318 → 199 로 단조 감소한다. 1~3스레드는 차이가 없다(1.00~1.03).
+
+> 기존 구현은 네 스레드가 동일한 activation 을 **서로 다른 주소에 각각 pack** 하여 네 개의
+> 독립된 cache footprint 를 만든다. 큰 K 에서는 이 footprint 가 private L2 와 shared
+> cache/memory path 를 압박해 4스레드 확장성을 무너뜨린다. 하나의 packed activation 을
+> 공유하면 `K=14336` 에서도 333.8 GOPS 로 회복된다.
+
+("트래픽이 정확히 4배" 는 부정확하다 — 논리적 read 횟수는 shared 에서도 네 스레드에
+남는다. 차이는 **동일 cache line 을 공유하느냐, 서로 다른 네 사본을 읽느냐** 다.)
+
+### ⚠️ 앞선 K-sweep 해석 철회
+
+    철회:  "긴 K 의 16-row activation panel 이 L2 에 안 들어간다"
+    정정:  panel 크기 자체는 무관하다. 공유하면 238 KiB 에서도 평탄하다.
+           K-sweep 은 **중복 pack 조건에서만** 측정됐으므로 K 효과와 교락돼 있었다.
+
+### ⚠️ KP-SDOT 중단
+
+`333.8` 이 238 KiB panel 에서 나오므로 **K-panelization 은 존재하지 않는 문제를 푼다.**
+
+다만 KP-SDOT 프로토타입의 부산물은 보존한다 — accumulator 저장·복원으로
+**K-panel continuation 이 bit-identical 함을 확인**했다(P=64/128/224 모두 YES).
+production 우선순위에서는 내려놓되, 정확한 panel 분할이 가능하다는 보조 결과다.
+
+### ⚠️ `shared=333.8` 은 kernel upper bound 다
+
+측정에서 shared buffer 를 타이밍 루프 **밖에서** 생성했다. 따라서
+
+    T_shared = T_pack-once + T_barrier + T_GEMM
+
+중 `T_GEMM` 만 잰 값이다. production 예상치로 바로 쓸 수 없으며, 별도 pack op 를
+넣은 최종 측정에서 pack 과 executor boundary 까지 포함해야 한다.
+
+---
+
+## 6d. SharedPack-SDOT — 구현 구조
+
+### 두 단계 공유
+
+**1. Inter-thread sharing** — 하나의 GEMM 안에서 네 스레드가 동일 packed activation 공유.
+Down 의 1.68× 는 주로 이 효과다.
+
+**2. Inter-projection sharing** — 입력이 같은 projection 들이 재사용.
+
+    Attention   pack(xq) 1회 → Q, K, V
+    FFN         pack(yq) 1회 → Gate, Up
+    Down        pack(dq) 1회 → Down
+    O           별도 입력 → 별도 pack
+
+    기존:  7 projection × 4 private copies
+    변경:  QKV 1 + Gate/Up 1 + Down 1 + O 1
+
+Inter-thread 부터 구현하고, buffer lifetime 을 늘려 projection-family sharing 을 추가한다.
+
+### 구조 — 별도 `OP_PACK_Q80X4`
+
+    Q80 activation
+           │
+           ▼
+    OP_PACK_Q80X4        네 스레드가 shared buffer 의 서로 다른
+                         batch-row group 범위를 병렬로 작성
+           │
+           ▼             executor op boundary = barrier
+    shared Q8x4 activation
+      ├─ thread 0: GEMM output columns 0
+      ├─ ...
+
+**한 스레드만 pack 하게 하지 않는다.** 기존 executor 의 op boundary 가 필요한
+synchronization 을 제공한다. shared buffer 는 `thread_local` 이나 전역 static 이 아니라
+**실행 context 가 소유**해야 한다.
+
+### 처리해야 할 예외
+
+- 마지막 microbatch 가 4행 미만이면 기존 Q80 GEMV fallback 유지
+- `lm_head` 의 마지막 행 범위는 초기 적용 대상에서 제외
+- shared packed buffer 의 stride 와 `rowBegin` 을 명시적으로 전달
+- wave pipeline 에서 서로 다른 실행이 같은 workspace 를 덮어쓰지 않도록 context 별
+  generation 관리
+- `DLLAMA_REPACK=0` 경로 유지
+- Q80 원본은 fallback 이 필요하므로 첫 구현에서 보존
+
+### 예상 E2E
+
+    Down              29.44% / 1.68
+    Gate+Up           39.28% / 1.04
+    Q/K/V/O GEMM      15.41% / 1.04
+    non-GEMM          15.87%
+
+    T_new ≈ 0.2944/1.68 + 0.3928/1.04 + 0.1541/1.04 + 0.1587 ≈ 0.860
+    E2E   ≈ **1.16×**
+
+초기 목표는 **1.15~1.17×**. 20% 까지 남는 것은 약 2.7 %p 이므로, SharedPack 성공 후
+전체 GEMM 에 **추가 4% 정도**면 도달한다.
+
+### 사전등록 기준
+
+| 항목 | 기준 |
+|---|---|
+| Down kernel | ≥1.45×, 목표 ≥1.60× |
+| Gate/Up | 비열화 금지, 가능하면 ≥1.03× |
+| 전체 projection 가중평균 | ≥1.15× |
+| 단일 노드 E2E | ≥1.12× 1차, ≥1.15× 강한 성공 |
+| 정확성 | packed bytes 및 GEMM output **bit-identical** |
+| 최종 목표 | 후속 최적화 포함 E2E ≥1.20× |
+
+### novelty 는 정직하게
+
+GEMM 의 shared input packing 자체는 전통적 BLAS 기법이다. **이것만으로 새 알고리즘이라
+주장할 수 없다.** 강한 형태는 다음 단계까지 포함해야 한다.
+
+> 여러 CPU 스레드와 연속 projection 이 하나의 quantized activation panel 을 공유하고,
+> F32→Q80 생성 단계에서 **downstream SDOT layout 을 직접 산출**하는 exact
+> packed-activation dataflow.
+
+---
+
 ## 7. 진행 순서
 
     1. QCFuse intermediate fusion 기각 기록          ← 완료

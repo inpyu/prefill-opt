@@ -45,7 +45,7 @@ static double nowSec() {
 
 int main(int argc, char **argv) {
     const int reps = argc > 1 ? atoi(argv[1]) : 5;
-    printf("# shape\tthreads\tbatch\tpack_ms\tgemm_ms\ttotal_ms\tGOPS\tpack%%\n");
+    printf("# shape\tthreads\tbatch\tmode\tgemm_ms\tGOPS\n");
 
     for (const Shape &s : SHAPES) {
         const int kBlocks = s.k / Q40_BLOCK_SIZE;
@@ -68,49 +68,49 @@ int main(int argc, char **argv) {
                 }
                 std::vector<float> C((size_t)b * s.d, 0.0f);
 
-                double bestPack = 1e18, bestGemm = 1e18;
-                for (int r = 0; r < reps; r++) {
-                    // ── pack 구간: production 과 동일하게 스레드마다 전체를 중복 변환 ──
-                    double p0 = nowSec();
-                    std::vector<std::vector<block_q8_0x4>> Xr(nt);
-                    {
-                        std::vector<std::thread> ts;
-                        for (int t = 0; t < nt; t++)
-                            ts.emplace_back([&, t]() {
-                                Xr[t].resize((size_t)(b / 4) * kBlocks);
-                                for (int g = 0; g < b / 4; g++)
-                                    nnPackQ80To4x4(&X[(size_t)g * 4 * kBlocks],
-                                                   &Xr[t][(size_t)g * kBlocks], kBlocks);
-                            });
-                        for (auto &t : ts) t.join();
+                for (int mode = 0; mode < 2; mode++) {   // 0 = 중복(production), 1 = 공유
+                    double bestGemm = 1e18;
+                    std::vector<block_q8_0x4> shared;
+                    if (mode == 1) {
+                        shared.resize((size_t)(b/4)*kBlocks);
+                        for (int g = 0; g < b/4; g++)
+                            nnPackQ80To4x4(&X[(size_t)g*4*kBlocks], &shared[(size_t)g*kBlocks], kBlocks);
                     }
-                    const double packT = nowSec() - p0;
-
-                    // ── GEMM core ──
-                    double g0 = nowSec();
-                    {
-                        std::vector<std::thread> ts;
-                        for (int t = 0; t < nt; t++)
-                            ts.emplace_back([&, t]() {
-                                const int nCols4 = s.d / 4, per4 = (nCols4 + nt - 1) / nt;
-                                const int c0 = t * per4 * 4;
-                                if (c0 >= s.d) return;
-                                int cN = per4 * 4; if (c0 + cN > s.d) cN = s.d - c0;
-                                ggml_gemm_q4_0_4x4_q8_0(s.k, &C[c0], s.d,
-                                    &W[(size_t)(c0 / 4) * kBlocks], Xr[t].data(), b, cN);
-                            });
-                        for (auto &t : ts) t.join();
+                    for (int r = 0; r < reps; r++) {
+                        std::vector<std::vector<block_q8_0x4>> Xr(nt);
+                        if (mode == 0) {
+                            std::vector<std::thread> ts;
+                            for (int t = 0; t < nt; t++)
+                                ts.emplace_back([&, t]() {
+                                    Xr[t].resize((size_t)(b/4)*kBlocks);
+                                    for (int g = 0; g < b/4; g++)
+                                        nnPackQ80To4x4(&X[(size_t)g*4*kBlocks], &Xr[t][(size_t)g*kBlocks], kBlocks);
+                                });
+                            for (auto &t : ts) t.join();
+                        }
+                        double g0 = nowSec();
+                        {
+                            std::vector<std::thread> ts;
+                            for (int t = 0; t < nt; t++)
+                                ts.emplace_back([&, t]() {
+                                    const int nCols4 = s.d / 4, per4 = (nCols4 + nt - 1) / nt;
+                                    const int c0 = t * per4 * 4;
+                                    if (c0 >= s.d) return;
+                                    int cN = per4 * 4; if (c0 + cN > s.d) cN = s.d - c0;
+                                    const block_q8_0x4 *src = (mode == 0) ? Xr[t].data() : shared.data();
+                                    ggml_gemm_q4_0_4x4_q8_0(s.k, &C[c0], s.d,
+                                        &W[(size_t)(c0/4)*kBlocks], src, b, cN);
+                                });
+                            for (auto &t : ts) t.join();
+                        }
+                        const double gemmT = nowSec() - g0;
+                        if (gemmT < bestGemm) bestGemm = gemmT;
                     }
-                    const double gemmT = nowSec() - g0;
-                    if (packT < bestPack) bestPack = packT;
-                    if (gemmT < bestGemm) bestGemm = gemmT;
+                    const double ops = 2.0 * s.d * s.k * b;
+                    printf("%s\t%d\t%d\t%s\t%.3f\t%.1f\n", s.name, nt, b,
+                           mode == 0 ? "dup" : "shared", bestGemm*1e3, ops/bestGemm/1e9);
+                    fflush(stdout);
                 }
-                const double tot = bestPack + bestGemm;
-                const double ops = 2.0 * s.d * s.k * b;
-                printf("%s\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.1f\t%.1f\n",
-                       s.name, nt, b, bestPack*1e3, bestGemm*1e3, tot*1e3,
-                       ops/bestGemm/1e9, 100.0*bestPack/tot);
-                fflush(stdout);
             }
         }
     }
