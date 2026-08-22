@@ -1,0 +1,7 @@
+6eb9e789a073c68f3a9f00a87f9dcd27  ./dirty.patch
+98ed841901431bd5045c43aa837ad1c4  ./raw/shape_cross.tsv
+3d71c4dd0e77bb6635049ab8f5b4e324  ./raw/S447_B32.log
+13698f07a182407997bc028228048ca3  ./raw/k_sweep.tsv
+b17608f09fa9040665c6c4873da09bc1  ./environment.txt
+3e443c3d7604ab57985aa26b750433ae  ./manifest.json
+c305b9182021853c6476938cc46e6a54  ./hosts.tsv

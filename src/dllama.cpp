@@ -7,6 +7,7 @@
 #include "llm.hpp"
 #include "tokenizer.hpp"
 #include "app.hpp"
+void reportOpProfile();
 #include <climits>
 #include <stdexcept>
 #include <cmath>
@@ -785,6 +786,7 @@ static void inference(AppInferenceContext *context) {
         predTotalTimeMs / ((float) nPredTokens));
     printf("Timing\n");
     printf("  prefillMs: %3.2f\n", prefillWallUs / 1000.0f);
+    reportOpProfile();      // QCFuse 1단계: op 별 시간 (DLLAMA_OP_PROFILE=1)
     nnCpuOpsReportAttSkipProbe();
     // EXP-1: H1 판정용. syncWait은 peer 대기(straggler), syncXfer는 실제 바이트 이동.
     printf(" syncWaitMs: %3.2f\n", prefillSyncWaitUs / 1000.0f);

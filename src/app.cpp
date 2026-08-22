@@ -12,6 +12,9 @@
 #include <thread>
 #include <vector>
 #include <cmath>
+#include <map>
+#include <string>
+#include <algorithm>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <cerrno>
@@ -1035,6 +1038,47 @@ void RootLlmInference::clearSpGroupOverrides() {
 //
 // attL0 >> attRest 이고 firstStep 이 작으면 "attention 반복 setup" 이 있는 것이고,
 // firstStep 에 몰리면 dispatch 비용이라 경계 signature 로 제어할 수 없다.
+// QCFuse 1단계 — op 이름별 시간 집계 (research/18 §1)
+//
+// 왜 필요한가: FFN 의 "materialization tax"(대형 F32 중간 버퍼를 쓰고 다시 읽어
+// Q80 으로 양자화하는 비용)가 실제로 얼마인지 알아야 QCFuse 의 상한이 정해진다.
+// ffnMs 하나로는 GEMM 과 부대 연산이 뭉쳐 있어 구분되지 않는다.
+//
+// DLLAMA_OP_PROFILE=1 로 켠다. prefill 이 끝나면 op 이름별 누적 시간을 출력한다.
+// 계측은 executor 가 이미 재는 stepTimeUs 를 읽는 것이므로 추가 비용이 없다.
+static std::map<std::string, unsigned long long> g_opUs;
+static unsigned long long g_opTotalUs = 0;
+
+static bool opProfileOn() {
+    static const char *on = std::getenv("DLLAMA_OP_PROFILE");
+    return on != nullptr && on[0] == '1';
+}
+
+static void accumulateOpProfile(NnExecutor *ex) {
+    if (!opProfileOn())
+        return;
+    static std::vector<const char *> nm(4096);
+    static std::vector<NnUint> ly(4096), us(4096);
+    const NnUint n = ex->getLastForwardStepTimes(nm.data(), ly.data(), us.data(), 4096);
+    for (NnUint i = 0; i < n; i++) {
+        g_opUs[nm[i] ? nm[i] : "(null)"] += us[i];
+        g_opTotalUs += us[i];
+    }
+}
+
+void reportOpProfile() {
+    if (!opProfileOn() || g_opUs.empty())
+        return;
+    std::vector<std::pair<unsigned long long, std::string>> v;
+    for (const auto &kv : g_opUs) v.push_back({kv.second, kv.first});
+    std::sort(v.rbegin(), v.rend());
+    printf("\n=== op profile (DLLAMA_OP_PROFILE) total=%.1f ms ===\n", g_opTotalUs / 1000.0);
+    printf("%-28s %12s %8s\n", "op", "ms", "%");
+    for (const auto &p : v)
+        printf("%-28s %12.1f %7.2f%%\n", p.second.c_str(), p.first / 1000.0,
+               100.0 * p.first / g_opTotalUs);
+}
+
 static void dumpChunkDetail(NnExecutor *ex, const char *tag, NnUint pos, NnUint batch) {
     static const char *on = std::getenv("DLLAMA_DUMP_CHUNK");
     if (on == nullptr || on[0] != '1')
@@ -1090,6 +1134,7 @@ void RootLlmInference::forward() {
     //   (B) 첫 마이크로배치만    -> 무시 가능
     // 중 무엇인지에 따라 모델이 달라진다. 집계값으로는 구분할 수 없다.
     dumpChunkDetail(executor, "root", controlPacket.position, controlPacket.batchSize);
+    accumulateOpProfile(executor);
     if (pipeline.get() != nullptr && pipeline->shouldSendActivations()) {
         const NnSize payloadBytes = xPipeRowBytes * controlPacket.batchSize;
         if (!pipeline->sendActivation(
@@ -2394,6 +2439,7 @@ void runWorkerApp(AppCliArgs *args) {
                         if (executor.getLastForwardOpBreakdown(&opBreakdown)) {
                             inference.recordOpTiming(opBreakdown);
                             dumpChunkDetail(&executor, "worker", 0u, 0u);
+                            accumulateOpProfile(&executor);
                         }
                     }
                     inference.afterForward();
