@@ -1305,38 +1305,102 @@ widening 이 필요하다. lane 은 16 이 아니라 8 또는 4 다.
 
 > **`16 vs 18.7` 과 `0.856×` 는 논문에 쓰지 않는다.**
 
-### 7.11.2 production block loop 실측 census
+### 7.11.2 production block loop — steady-state census (재정정)
 
-`src/nn/nn-repack.cpp` 블록 루프 1회(2,048 MAC):
+⚠️ 최초 census 297 은 **epilogue 를 포함한 오류**였다. 블록 루프는
+`nn-repack.cpp` 라인 222~478 이고(`bgt 3b` 로 되돌아감), 그 뒤 `str 16 + add 16` 은
+**K loop 전체가 끝난 뒤 결과 16행을 저장할 때 1회**만 실행된다.
 
-| 명령군 | 개수 |
+| 명령군 | K-block 당 |
 |---|---|
 | **SDOT** | **128** |
 | ldr | 41 |
-| add | 21 |
 | movi | 18 |
-| str | 16 |
 | scvtf | 16 |
 | fmul | 16 |
 | fmla | 16 |
-| fcvtl / sshl / and / 기타 | 25 |
-| **합계** | **297** |
+| fcvtl | 5 |
+| add | 5 |
+| sshl / and | 8 |
+| subs / sub / bgt | 3 |
+| **합계** | **256** |
 
-**MAC per 명령 = 6.90** — SDOT 의 이론적 16 보다 훨씬 낮다. production 커널 자체에
-부대 비용(load·scale·convert)이 상당하다는 뜻이며, 이는 후보에게 유리한 조건이다.
+`K=4096 → 128 블록`, `K=14336 → 448 블록` 이므로 epilogue 는 블록당 0 으로 수렴한다.
+
+    C_base(K) = C_init + 256·⌈K/32⌉ + C_epilogue
+
+⚠️ **`MAC per instruction = 6.90` 은 삭제한다.** 297 이 잘못된 동적 회계였고, 더
+근본적으로 **instruction 수는 cycle 수가 아니다.** A76 은 load·integer ALU·FP·SDOT 을
+일부 겹쳐 발행하므로 부대 명령 128개가 SDOT 실행시간에 그대로 더해지지 않는다.
+
+정확한 비교는 execution-port throughput 과 dependency 를 반영해야 한다.
+
+    C(t,b) = max_r [ N_r(t,b) / Throughput_r ] + C_dependency + C_spill
+
+따라서 range-aware counter 는 **cycle 이 아니라 명령 feature vector 를 출력**하고,
+1b-1 ISA 측정 이후에 cycle 로 환산한다.
+
+    { N_sdot, N_load, N_tbl, N_add16, N_add32, N_widen, N_convert, N_fma, live_regs }
 
 ### 7.11.3 정정된 lower bound
 
-| 후보 | lane | vector op | 총계(+descriptor 20, TBL 16, red/scale 16) | vs production |
+| 후보 | lane | vector op | 총계 | vs production(256) |
 |---|---|---|---|---|
 | int8 | 16 | 139 | — | **불가 (Q8 합산 시 overflow)** |
-| **int16 widening** | 8 | 278 | **330** | **0.900×** |
-| int32 widening | 4 | 556 | 608 | 0.488× |
+| **int16 widening** | 8 | 278 | **330** | **0.776×** |
+| int32 widening | 4 | 556 | 608 | 0.421× |
 
-1.35× 를 넘으려면 **220 명령 이하** 여야 한다.
+1.35× 를 넘으려면 **약 190 명령 이하** 여야 한다(이전 판의 220 보다 엄격).
 
-**pure replacement 는 여전히 미달이다.** 다만 최초 판(0.856×)보다 후보에 유리해졌고,
-`0.900×` 는 "전면 대체 불가" 를 뜻할 뿐 **panel 별 선택까지 배제하지 않는다.**
+**pure replacement 는 명확히 미달이다.**
+
+### 7.11.4 hybrid 는 아직 열려 있으나 coverage gate 를 바꿔야 한다
+
+전체 panel 중 비율 `p` 만 `r_h` 배 빨라지면
+
+    E_total = 1 / ( (1−p) + p/r_h )
+
+| 선택 panel 가속 `r_h` | 전체 1.35× 에 필요한 coverage |
+|---|---|
+| 1.5× | 77.8% |
+| 2.0× | 51.9% |
+| 3.0× | 38.9% |
+| 5.0× | 32.4% |
+
+`p = 0.30, r_h = 1.35` 이면 `E = 1.084×` 뿐이다.
+**따라서 `coverage ≥ 30%` 를 독립 gate 로 쓰면 안 된다.** 최종 판정은 aggregate 식
+하나로 한다.
+
+    E_pred = Σ_t C_SDOT(t) / ( C_dispatch + Σ_t min_b C(t,b) )
+
+### 7.11.5 SDOT fallback 이 "구조적으로 지지 않음" 은 아니다
+
+offline 에서 SDOT 을 선택해도 다음 비용이 남는다 — panel type descriptor, 분기/indirect
+dispatch, code-size 와 instruction-cache 손실, panel 재배열, projection 별 kernel 호출
+증가.
+
+> 각 panel 은 SDOT fallback 을 가지므로 **산술 본체의 손실을 제한한다.** 전체 비열화는
+> dispatch 와 layout 비용을 포함한 **E2E 측정**으로 확인한다.
+
+### 7.11.6 남은 salvage 경로 (1일 제한)
+
+**1b-0R 정적 feature counter** — 각 실제 panel 에 대해 dense SDOT / zero·sign 특수화 /
+int16 widen-add / int32 widen-add / TBL / SDOT–TBL mixed 를 lower 하고, **cycle 이 아니라
+명령 feature vector 와 정확한 range** 를 출력한다.
+
+**1b-1 ISA 비용 측정** — 독립 SDOT 과 dependency-chain SDOT, `SADDL`/`SADDW`/int16·int32
+add, TBL 과 shuffle, load 와 descriptor load, SDOT–load/TBL interleave, register
+24/28/32 에서 spill. 이것으로 feature vector 를 cycle 로 변환한다.
+
+**최종 gate** — 모두 만족할 때만 prototype 으로 간다.
+
+    optimistic aggregate upper bound ≥ 1.35×
+    descriptor 증가 ≤ 10%
+    live registers ≤ 28
+    모든 부분합 range 가 정적으로 증명됨
+    비-SDOT 선택 panel 이 실제로 존재
+
+**optimistic upper bound 조차 1.35× 미만이면 즉시 종료한다.**
 
 ---
 
@@ -1351,7 +1415,7 @@ widening 이 필요하다. lane 은 16 이 아니라 8 또는 4 다.
 | 0c 정확성 기준선 | 통과 — gate 확정 |
 | 0d null 사전등록 | 완료 |
 | **1a weight-aware** | **기각** — tile_hist Δ = −0.37 %p (기준 ≥10 %p) |
-| **1b-0 lower bound** | **기각** — 후보 최선 0.856× (기준 ≥1.35×) |
+| **1b-0 lower bound** | **재평가 중** — 최초 0.856× 는 batch 축 누락으로 철회(§7.11.1). steady-state 재계산 시 pure replacement 0.776×, hybrid 경로는 1b-0R 진행 |
 
 §19 의 go/no-go 표에서 두 항목이 No-go 다.
 
@@ -1359,6 +1423,9 @@ widening 이 필요하다. lane 은 16 이 아니라 8 또는 4 다.
     current SDOT 보다 빠른가?                → 이론적 하한부터 미달
 
 **§19 대로 WCEP 를 DerivePP 의 새 중심 기여로 만들지 않는다.**
+
+⚠️ 단 `1b-0` 항목은 **재평가 중**이다. pure replacement 는 명확히 기각(0.776×)이나
+range-aware hybrid 는 1b-0R 결과를 기다린다. weight-aware 기각(1a)은 변함없다.
 
 ### 7.12.2 논문에서의 위치
 
