@@ -1282,62 +1282,61 @@ ARM SDOT 은 한 명령으로 여러 int8 MAC 을 처리하므로, ADD 가 싸�
 
 ---
 
-## 7.11 Phase 1b-0 — 이론적 lower bound 로 generic kernel 도 종료
+## 7.11 Phase 1b-0 — ⚠️ 최초 판 무효, production 단위로 재계산
 
-1a 가 weight-aware 를 기각한 뒤, 45.7% 라는 큰 symbolic 절약이 ARM 에서 회수되는지를
-**generic exact Q4 kernel** 로 따로 물었다. 가장 값싼 단계인 이론적 명령 수 하한에서
-종료 조건이 나왔다.
+### 7.11.1 최초 판의 오류 (철회)
 
-### 7.11.1 tile 당 명령 수 (tile = 4 output row × 32 input weight)
+최초 1b-0 은 `16 vs 18.7 instructions/tile`, 비율 `0.856×` 로 종료를 주장했다.
+**두 가지가 틀렸다.**
 
-**현재 경로** (`ggml_gemm_q4_0_4x4_q8_0`) — `block_q4_0x4` 가 4열을 인터리브 저장하므로
-언팩 없이 SDOT 에 직접 투입한다.
+**① batch 축 누락.** tile 을 `4 output row × 32 weight = 128 MAC`(SDOT 8개)으로 셌으나,
+production prefill GEMM 의 블록 루프는 한 번에
 
-| 항목 | 명령 |
+    4 output col × 16 batch row × 32 K = 2,048 MAC
+
+를 처리한다. 실제 assembly(`src/nn/nn-repack.cpp:222` Block loop)에 **SDOT 128개**가
+있다. 최초 회계는 사실상 batch 1 GEMV 에 가깝고 우리가 최적화하려는 `B=16` prefill
+GEMM 과 단위가 다르다.
+
+**② lane 수 과대.** 후보의 `139/16 = 8.7` 도 성립하지 않는다. `139` 는 **activation
+row 하나**를 처리하는 scalar DAG 다. 16 batch row 에 적용하려면 batch 축으로 SIMD 화해야
+하고, **두 Q8 값을 더하는 순간 int8 범위를 넘으므로** exact 연산에는 int16/int32
+widening 이 필요하다. lane 은 16 이 아니라 8 또는 4 다.
+
+> **`16 vs 18.7` 과 `0.856×` 는 논문에 쓰지 않는다.**
+
+### 7.11.2 production block loop 실측 census
+
+`src/nn/nn-repack.cpp` 블록 루프 1회(2,048 MAC):
+
+| 명령군 | 개수 |
 |---|---|
-| Q4 nibble → int8 확장 | 4 |
-| **SDOT** (128 MAC ÷ 16 MAC/명령) | **8** |
-| Q8 load | 2 |
-| scale(fp16→fp32) + FMA | 2 |
-| **합계** | **16** |
+| **SDOT** | **128** |
+| ldr | 41 |
+| add | 21 |
+| movi | 18 |
+| str | 16 |
+| scvtf | 16 |
+| fmul | 16 |
+| fmla | 16 |
+| fcvtl / sshl / and / 기타 | 25 |
+| **합계** | **297** |
 
-**후보 경로** — 1a 의 symbolic 절약 `256 → 139 ops` 를 SIMD 로 묶는다.
+**MAC per 명령 = 6.90** — SDOT 의 이론적 16 보다 훨씬 낮다. production 커널 자체에
+부대 비용(load·scale·convert)이 상당하다는 뜻이며, 이는 후보에게 유리한 조건이다.
 
-| 항목 | 명령 | 가정 |
-|---|---|---|
-| 덧셈 (139 ops) | 8.7 | **16 lane 에 완벽 패킹** (최선) |
-| descriptor load | 2 | 최소 |
-| TBL/shuffle | 4 | 최소 |
-| reduction + scale | 4 | |
-| **합계** | **18.7** | |
+### 7.11.3 정정된 lower bound
 
-### 7.11.2 판정 — 즉시 종료
+| 후보 | lane | vector op | 총계(+descriptor 20, TBL 16, red/scale 16) | vs production |
+|---|---|---|---|---|
+| int8 | 16 | 139 | — | **불가 (Q8 합산 시 overflow)** |
+| **int16 widening** | 8 | 278 | **330** | **0.900×** |
+| int32 widening | 4 | 556 | 608 | 0.488× |
 
-    현재 SDOT      16.0 명령
-    후보 최선      18.7 명령
-    비율           0.856x
-    1.35x 기준     11.9 명령 이하 필요
+1.35× 를 넘으려면 **220 명령 이하** 여야 한다.
 
-**이상적 lower bound 부터 production SDOT 보다 느리다.** §7.11 사전등록대로
-**1b-1(ISA 측정)과 1b-2(프로토타입)를 수행하지 않는다.**
-
-위 계산은 후보에 최대한 유리하다 — 139 ops 를 16 lane 에 완벽 패킹(실제로는 값별
-그룹 크기가 제각각), descriptor 2개, TBL 4개, dependency chain·spill 무시.
-그럼에도 진다.
-
-### 7.11.3 근본 원인 — 회계가 SDOT 의 융합을 무시했다
-
-WCEP 의 전제는 **"곱셈이 덧셈보다 비싸다"** 였다. ARM SDOT 은 이를 무효화한다.
-
-    SDOT   128 MAC -> 8 명령      (명령당 16 MAC, 곱+누산 융합)
-    후보   139 op  -> 8.7 명령    (명령당 16 op, 최선 가정)
-
-1a 의 `256 → 139` 절약은 **곱과 덧셈을 각각 1 op 로 센 회계**다. SDOT 기준으로는
-128 MAC = 128 op 이고, 후보의 139 op 는 **오히려 많다.** 덧셈으로 바꿔 얻는 이득보다
-벡터 패킹을 잃는 손실이 크다.
-
-§7.10.1 에서 baseline 회계를 고칠 때 이미 이 전제가 드러났고("곱과 덧셈 비용이 같다면
-값 뭉침은 n MAC → n+1 op 로 오히려 손해"), 1b-0 이 그것을 정량화했다.
+**pure replacement 는 여전히 미달이다.** 다만 최초 판(0.856×)보다 후보에 유리해졌고,
+`0.900×` 는 "전면 대체 불가" 를 뜻할 뿐 **panel 별 선택까지 배제하지 않는다.**
 
 ---
 
