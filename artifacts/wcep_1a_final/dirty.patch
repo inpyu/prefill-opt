@@ -1,0 +1,195 @@
+diff --git a/research/17-weight-compiled-prefill.md b/research/17-weight-compiled-prefill.md
+index 36af1d0..472579b 100644
+--- a/research/17-weight-compiled-prefill.md
++++ b/research/17-weight-compiled-prefill.md
+@@ -1085,6 +1085,56 @@ template 을 발견한 데이터와 평가 데이터가 같으면 coverage 가 
+ 
+ ---
+ 
++### 7.8.8 고정 파라미터 (결과 보기 전 확정 — 이후 변경 금지)
++
++| 항목 | 값 |
++|---|---|
++| beam-search 표본 | **(layer × projection) 당 64 tile** — 32 layer × 7 projection = 224 그룹, 총 14,336 tile |
++| null 반복 수 `R` | **8** (actual tile 마다 paired 생성) |
++| random seed | **20260822** (고정) |
++| bootstrap 반복 | **10,000** (layer-cluster, 32 layer) |
++
++전수 조사 항목(nibble histogram, entropy, 반복 pattern, 단순 CSE 상한)은 표본을
++쓰지 않는다.
++
++### 7.8.9 용어 — 1a 에서는 µop 이라 부르지 않는다
++
++1a 는 **ISA lowering 을 하지 않는다.** 따라서 지표는
++
++    symbolic operation-count reduction   (또는 predicted µop reduction)
++
++이라 부른다. **실제 µop 과 성능 환산은 1b 이후에만 사용한다.** §7.4.6 과 §9.3 의
++"µop 절약" 표현도 이 정의로 읽는다.
++
++### 7.8.10 Phase 1a 판정 기준 (사전등록)
++
++    weighted symbolic-op reduction        ≥ 25%
++    tile-hist null 대비 추가 절약         ≥ 10 %p
++    layer-bootstrap 95% CI 하한           ≥ 5 %p
++    template-64 coverage                  ≥ 90%
++
++모두 통과 → 1b 진행.
++하나라도 실패 → **커널 구현 없이 WCEP 의 weight-aware 가설을 기각.**
++
++### 7.8.11 필수 self-test
++
++| 대상 | 확인 |
++|---|---|
++| projection-hist null | projection 별 nibble 개수가 원본과 **정확히** 동일 |
++| tile-hist null | 모든 tile 의 16-value histogram 이 정확히 동일 |
++| cross-output null | row 별 histogram 보존, row 간 대응만 파괴 |
++| actual weight buffer | 실행 전후 hash 동일 (read-only 보장) |
++| 재현성 | 같은 seed → null 과 결과 hash 동일 |
++
++### 7.8.12 산출물
++
++    artifacts/wcep_1a/
++      manifest.json  scanner_config.json  model_sha256.txt
++      projection_summary.tsv  layer_summary.tsv  template_coverage.tsv
++      paired_null_effect.tsv  bootstrap_ci.tsv  selftest.log
++
++---
++
+ ## 7.9 Phase 1 재구성 — 구조 gate 와 성능 gate 를 분리한다
+ 
+ §9.3 의 "예상 speedup ≥1.35×" 는 **µop 개수만으로 판정할 수 없다.** 명령마다
+@@ -1101,6 +1151,133 @@ throughput·latency 가 다르고 register spill 도 있다. 세 단계로 나
+ 
+ ---
+ 
++## 7.10 Phase 1a 결과 — weight-aware 가설 기각 (유효 데이터)
++
++`prefill_bench/wcep_scan.cpp`, `artifacts/wcep_1a/`. read-only 확인 완료.
++파라미터는 §7.8.8 고정값(표본 64 tile/그룹, null 8회 paired, seed 20260822,
++bootstrap 10,000).
++
++### 7.10.1 세 번의 무효화 — 검증기를 먼저 쓰지 않은 대가
++
++| # | 오류 | 증상 | 보존 위치 |
++|---|---|---|---|
++| 1 | baseline 회계 단위 불일치 | 표본 절약이 **−5.38%**(음수) | (수정 즉시) |
++| 2 | embedding 을 Q4_0 으로 가정 (실제 **F32**) | layer 14→15 에서 급변(64.8→46.7%) | `artifacts/wcep_1a_invalid_embedding_offset/` |
++| 3 | FFN 파일 순서 `Gate→Up→Down` (실제 **W1→W2→W3 = Gate→Down→Up**) | offset self-test 는 통과 | `artifacts/wcep_1a_invalid_ffn_order/` |
++
++**1** — baseline 을 128(MAC 수)로 두고 최적화만 곱·덧셈을 따로 셌다. 정합 정의:
++baseline `2×4×32 = 256`, 최적화 `v=0→0`, `|v|=1→n`, `else→n+1`.
++
++**2** — `src/llm.cpp` 한 줄(`tokenEmbeddingSize = size2D(F_32, …)`)만 봤으면 알 수
++있었다. 1.68 GiB 어긋나 F32 embedding 중간을 Q4 로 해석했다.
++
++**3** — 세 FFN 행렬의 원소 수가 같아(`4096×14336 == 14336×4096`) **byte offset
++self-test 를 통과한다.** 그러나 output-row 경계와 tile 구성이 깨진다.
++FFN 이 전체 tile 의 75% 를 차지하므로 가중평균이 오염됐다.
++
++> **교훈 1**: 파일 포맷을 파싱하는 코드는 **검증기를 먼저 작성한다.** 파싱이 맞다는
++> 증거 없이 나온 통계는 전부 무의미하다.
++> **교훈 2**: byte 크기 self-test 로는 부족하다. **이름·shape 를 loader 와 대조**해야
++> 한다.
++
++Q4_0 nibble layout 도 함께 고쳤다 — `qs[j]` low → weight `j`, high → weight `j+16`
++(인접 쌍으로 읽고 있었다). `proj_hist` 는 전수 집계가 아니므로
++**`sampled_proj_hist`** 로 이름을 낮춰 exact 주장을 철회했다.
++
++### 7.10.2 offset self-test 통과
++
++    weights start   2,101,346,408
++    after layers    6,028,263,528
++    + final_norm    6,028,279,912
++    + wcls(q40)     6,323,781,736   (expect end)
++    file size       6,323,781,736
++    diff            0  OK
++
++헤더에서 읽은 형상(dim=4096, hidden=14336, nLayers=32, nKvHeads=8, headDim=128,
++vocab=128256)이 파일 크기와 **바이트 단위로** 일치한다. 형상은 하드코딩하지 않는다.
++
++### 7.10.3 절대 절약
++
++| projection | tiles | symbolic-op reduction |
++|---|---|---|
++| Q | 4,194,304 | 46.57% |
++| K | 1,048,576 | 46.92% |
++| V | 1,048,576 | 46.55% |
++| O | 4,194,304 | 45.43% |
++| Gate (W1) | 14,680,064 | 45.58% |
++| Down (W2) | 14,680,064 | 45.72% |
++| Up (W3) | 14,680,064 | 45.61% |
++
++### 7.10.4 matched-null 대비 — **음수**
++
++primary estimator(사전등록): layer 별 projection-weighted mean Δ + layer-cluster
++bootstrap 10,000회. median 은 보조 지표.
++
++| null | actual | null | **Δ** | 95% CI |
++|---|---|---|---|---|
++| uniform | 45.82% | 39.78% | **+5.98** | [+5.85, +6.15] |
++| sampled_proj_hist | 45.82% | 46.17% | −0.41 | [−0.48, −0.34] |
++| **tile_hist** | 45.82% | 46.15% | **−0.37** | [−0.39, −0.35] |
++| cross_out | 45.82% | 45.92% | −0.13 | [−0.15, −0.11] |
++
++### 7.10.5 판정 — 기각
++
++| 기준 | 값 | 판정 |
++|---|---|---|
++| weighted symbolic-op reduction ≥ 25% | 45.7% | 통과 |
++| tile-hist null 대비 추가 절약 ≥ 10 %p | **−0.37 %p** | **실패** |
++| layer-bootstrap 95% CI 하한 ≥ 5 %p | **−0.39 %p** | **실패** |
++
++**§7.8.10 에 사전등록한 대로 weight-aware 가설을 기각한다.**
++
++### 7.10.6 정확한 결론 문장
++
++> 현재 4×32 tile 과 symbolic operation proxy 에서는, actual weight 의 **공간 배열** 및
++> **단일 항 수준의 cross-output 일치** 가 matched null 보다 유리하지 않았다.
++> 효과크기는 사실상 0 이다(−0.37 %p).
++
++절약(45.8%)은 전적으로 Q4_0 의 **값 분포**에서 온다 — `uniform` 만 +5.98 %p 낮고,
++값 분포를 보존한 세 null 은 실제와 구분되지 않는다.
++
++⚠️ **다음 표현은 쓰지 않는다.**
++
++    "output row 간 공통 부분식이 존재하지 않는다"
++
++`cross_out` 이 검사하는 것은 동일 `(position, nibble value)` 재사용뿐이며, 여러 위치를
++조합한 더 복잡한 부분식까지 반증한 것은 아니다. 또한 −0.37 %p 는 통계적으로 0과
++달라도 **실질적으로 0** 이다. "무작위가 의미 있게 더 좋다" 가 아니라
++**"actual-specific advantage 가 없다"** 가 맞다.
++
++### 7.10.7 §16.2 novelty 표 갱신
++
++| 문장 | 상태 |
++|---|---|
++| "actual weight 를 컴파일한다" | **기각** |
++| "FFN permutation 으로 합성 template 을 clustering" | **근거 상실** — template 이 weight-specific 이 아니면 clustering 대상이 없다 |
++| "Q4×Q8 block-exact TBL–SDOT 공동 합성" | 후보 유지 — 단 **weight-aware 근거 없음**. generic kernel 로만 |
++
++### 7.10.8 이후 분리
++
++    WCEP weight-aware 가설    Phase 1a 실패 → 종료
++    generic exact Q4 kernel   Phase 1b 에서 별도 탐색 (반나절 bounded probe)
++    DerivePP 논문             계속 주 기여 (4.57~4.68×)
++
++Phase 1b 는 `ADD vs MUL` 단독 비교가 아니라 **전체 경로**를 비교한다.
++
++    기존:  load → SDOT → reduction → scale
++    후보:  load → TBL/shuffle → add/sub → reduction → scale
++
++ARM SDOT 은 한 명령으로 여러 int8 MAC 을 처리하므로, ADD 가 싸다는 사실만으로
++후보가 이길 수 없다.
++
++### 7.10.9 미완 산출물
++
++`scanner_config.json`, `model_sha256.txt`, `template_coverage.tsv`,
++`bootstrap_ci.tsv`, `selftest.log` 가 아직 없다. null 보존 조건 self-test(§7.8.11)도
++코드에 없다 — 이번 세 오류는 모두 **self-test 를 나중으로 미룬 결과**다.
++
++---
++
+ ## 8. Phase 0 — 현재 결과 보존
+ 
+ ### 목적

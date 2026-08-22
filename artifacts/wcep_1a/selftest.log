@@ -1,0 +1,8 @@
+# offset self-test
+#   weights start   2101346408
+#   after layers    6028263528
+#   + final_norm    6028279912
+#   + wcls(q40)     6323781736   (expect end)
+#   file size       6323781736
+#   diff            0 OK
+미완: null 보존 조건 self-test (projection nibble count / tile histogram / row histogram) — 코드 미구현

@@ -1,0 +1,9 @@
+{
+  "tile_rows": 4, "tile_k": 32,
+  "beam_sample_per_group": 64, "null_reps": 8,
+  "seed": 20260822, "bootstrap": 10000,
+  "nulls": ["uniform", "sampled_proj_hist", "tile_hist", "cross_out"],
+  "primary_estimator": "layer별 projection-weighted mean Δ + layer-cluster bootstrap",
+  "baseline_ops": "2 * tile_rows * tile_k = 256 (곱 1 + 누산 1 per element)",
+  "note": "sampled_proj_hist 는 전수 집계가 아님 — exact 주장 철회"
+}

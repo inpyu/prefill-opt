@@ -1,0 +1,170 @@
+diff --git a/research/17-weight-compiled-prefill.md b/research/17-weight-compiled-prefill.md
+index 36af1d0..0769708 100644
+--- a/research/17-weight-compiled-prefill.md
++++ b/research/17-weight-compiled-prefill.md
+@@ -1085,6 +1085,56 @@ template 을 발견한 데이터와 평가 데이터가 같으면 coverage 가 
+ 
+ ---
+ 
++### 7.8.8 고정 파라미터 (결과 보기 전 확정 — 이후 변경 금지)
++
++| 항목 | 값 |
++|---|---|
++| beam-search 표본 | **(layer × projection) 당 64 tile** — 32 layer × 7 projection = 224 그룹, 총 14,336 tile |
++| null 반복 수 `R` | **8** (actual tile 마다 paired 생성) |
++| random seed | **20260822** (고정) |
++| bootstrap 반복 | **10,000** (layer-cluster, 32 layer) |
++
++전수 조사 항목(nibble histogram, entropy, 반복 pattern, 단순 CSE 상한)은 표본을
++쓰지 않는다.
++
++### 7.8.9 용어 — 1a 에서는 µop 이라 부르지 않는다
++
++1a 는 **ISA lowering 을 하지 않는다.** 따라서 지표는
++
++    symbolic operation-count reduction   (또는 predicted µop reduction)
++
++이라 부른다. **실제 µop 과 성능 환산은 1b 이후에만 사용한다.** §7.4.6 과 §9.3 의
++"µop 절약" 표현도 이 정의로 읽는다.
++
++### 7.8.10 Phase 1a 판정 기준 (사전등록)
++
++    weighted symbolic-op reduction        ≥ 25%
++    tile-hist null 대비 추가 절약         ≥ 10 %p
++    layer-bootstrap 95% CI 하한           ≥ 5 %p
++    template-64 coverage                  ≥ 90%
++
++모두 통과 → 1b 진행.
++하나라도 실패 → **커널 구현 없이 WCEP 의 weight-aware 가설을 기각.**
++
++### 7.8.11 필수 self-test
++
++| 대상 | 확인 |
++|---|---|
++| projection-hist null | projection 별 nibble 개수가 원본과 **정확히** 동일 |
++| tile-hist null | 모든 tile 의 16-value histogram 이 정확히 동일 |
++| cross-output null | row 별 histogram 보존, row 간 대응만 파괴 |
++| actual weight buffer | 실행 전후 hash 동일 (read-only 보장) |
++| 재현성 | 같은 seed → null 과 결과 hash 동일 |
++
++### 7.8.12 산출물
++
++    artifacts/wcep_1a/
++      manifest.json  scanner_config.json  model_sha256.txt
++      projection_summary.tsv  layer_summary.tsv  template_coverage.tsv
++      paired_null_effect.tsv  bootstrap_ci.tsv  selftest.log
++
++---
++
+ ## 7.9 Phase 1 재구성 — 구조 gate 와 성능 gate 를 분리한다
+ 
+ §9.3 의 "예상 speedup ≥1.35×" 는 **µop 개수만으로 판정할 수 없다.** 명령마다
+@@ -1101,6 +1151,108 @@ throughput·latency 가 다르고 register spill 도 있다. 세 단계로 나
+ 
+ ---
+ 
++## 7.10 Phase 1a 결과 — **weight-aware 가설 기각**
++
++`prefill_bench/wcep_scan.cpp`, `artifacts/wcep_1a/`. read-only 확인 완료
++(실행 전후 모델 sha256 동일). 파라미터는 §7.8.8 고정값.
++
++### 7.10.1 ⚠️ baseline 회계 버그 (첫 판)
++
++처음에 baseline 을 `128`(MAC 개수)로 두고 최적화 쪽만 곱·덧셈을 따로 셌다.
++표본에서 절약이 **−5.38%**(음수)로 나와 발견했다.
++
++    baseline    원소마다 곱 1 + 누산 1        →  2 × 4 × 32 = 256
++    최적화      v=0        0 ops
++                |v|=1      n ops              (덧셈만)
++                그 외      n+1 ops            ((n−1) 덧셈 + 1 곱 + 1 누산)
++
++양쪽이 곱·덧셈을 각각 1 op 로 세야 비교가 성립한다.
++
++**이 정의가 WCEP 의 전제를 드러낸다** — 곱과 덧셈 비용이 같다면 값 뭉침은
++`n` MAC → `n+1` op 로 **오히려 손해**다. WCEP 의 이득은 전적으로 "곱셈이 덧셈보다
++비싸다" 에 의존하며, ARM SDOT 은 곱-누산을 융합한다. **Phase 1b 가 필수인 이유다.**
++
++### 7.10.2 절대 절약: 통과
++
++| projection | tiles | symbolic-op reduction |
++|---|---|---|
++| Q | 4,194,304 | 55.15% |
++| K | 1,048,576 | 55.14% |
++| V | 1,048,576 | 55.15% |
++| O | 4,194,304 | 55.17% |
++| Gate | 14,680,064 | 55.29% |
++| Up | 14,680,064 | 55.26% |
++| Down | 14,680,064 | 54.78% |
++
++기준 ≥25% 를 크게 통과한다. **그러나 이것만으로는 아무것도 말하지 못한다.**
++
++### 7.10.3 matched-null 대비: **실패**
++
++표본 (layer×projection) 당 64 tile, null 8회 paired, seed 20260822.
++
++| null | actual | null | Δ (%p) |
++|---|---|---|---|
++| uniform | 47.31% | 39.77% | **+7.56** |
++| proj_hist | 47.31% | 47.14% | +1.90 |
++| **tile_hist** | 47.31% | 46.18% | **+1.34** |
++| cross_out | 47.31% | 46.09% | +1.41 |
++
++layer-cluster bootstrap (tile_hist, 32 layer, 10,000회):
++**Δ 평균 +4.87 %p, 95% CI [+3.39, +6.20] %p**
++
++### 7.10.4 사전등록 기준 대비 판정
++
++| 기준 | 값 | 판정 |
++|---|---|---|
++| weighted symbolic-op reduction ≥ 25% | 55.1% | 통과 |
++| tile-hist null 대비 추가 절약 ≥ 10 %p | **1.34 %p** | **실패** |
++| layer-bootstrap 95% CI 하한 ≥ 5 %p | **+3.39 %p** | **실패** |
++| template-64 coverage ≥ 90% | 미측정 | — |
++
++**§7.8.10 에 사전등록한 대로 weight-aware 가설을 기각한다.**
++
++### 7.10.5 무엇이 반증됐는가
++
++절약의 거의 전부가 **Q4_0 값 분포**에서 나온다. 값 분포를 무시한 `uniform` 만
++7.56 %p 낮고, 분포를 보존한 세 null 은 1.3~1.9 %p 차이뿐이다.
++
++- **`tile_hist`** — tile 내 값 빈도를 정확히 보존하고 **위치만 셔플**했는데 46.18% 다.
++  → **공간적 배열에 구조가 없다.**
++- **`cross_out`** — 행 간 대응만 파괴했는데 46.09% 다.
++  → **output row 간 공통 부분식이 실재하지 않는다.** §4.2(4)와 §2.3(4)의 핵심 주장이
++  직접 반증된다.
++
++§7.4.6 의 두 갈래 중 첫 번째다.
++
++    actual ≈ null, 둘 다 빠름  →  generic exact mixed kernel.
++                                  "weight-aware" novelty 는 철회
++
++> **"실제 Q4 weight 값에 맞춰 산술 DAG 를 합성한다" 는 WCEP 의 핵심 novelty 는
++> 근거가 없다.** 같은 절약을 값 히스토그램만 맞춘 무작위 행렬에서도 얻는다.
++
++### 7.10.6 살아남는 것과 남은 질문
++
++절약 55% 자체는 실재한다. 다만 그것은 weight-aware 가 아니라 **Q4_0 포맷의 성질**이다 —
++값이 16개뿐이고 `0`·`±1` 이 자주 나와 곱셈을 줄일 여지가 있다.
++
++이것이 **generic exact kernel** 기여로 남으려면 Phase 1b 가 답해야 한다.
++
++> ARM SDOT 이 곱-누산을 융합 처리하는데, 곱셈을 덧셈으로 바꾸는 것이 실제로 이득인가?
++
++곱과 덧셈 비용이 같다면 **55% 절약은 0% 성능 이득**이다. §7.9 에서 1a(구조)와
++1c(성능)를 분리한 것이 이 지점을 위한 것이었고, 지금 1a 는 "구조는 있으나
++weight-specific 이 아니다" 라는 답을 냈다.
++
++### 7.10.7 §16.2 novelty 표 갱신
++
++| 문장 | 갱신된 상태 |
++|---|---|
++| "Q4×Q8 block-exact TBL–SDOT 공동 합성" | 후보 유지 — 단 weight-aware 근거 없음 |
++| "FFN permutation 으로 합성 template 을 clustering" | **근거 상실** — template 이 weight-specific 이 아니면 clustering 대상이 없다 |
++| "actual weight 를 컴파일한다" | **기각** (§7.10.5) |
++
++---
++
+ ## 8. Phase 0 — 현재 결과 보존
+ 
+ ### 목적
