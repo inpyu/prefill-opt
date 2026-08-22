@@ -237,6 +237,8 @@ int main(int argc, char **argv) {
     fprintf(fn, "layer\tprojection\tnull\tactual_red\tnull_red\tdelta_pp\n");
 
     std::map<std::string, long long> pBase, pOps, pTiles;
+    long long gaTotal = 0, gaEligible = 0; int gaMin = 1<<30;
+    long long gaHist[16] = {0};
 
     for (int L = 0; L < nLayers; L++) {
         for (int p = 0; p < NP; p++) {
@@ -275,6 +277,14 @@ int main(int argc, char **argv) {
                         rows[r] = &W[(size_t)(r0 + r) * kBlocks + kb];
                     const TileStat st = analyzeTile(rows);
                     base_ops += st.base; act_ops += st.ops; nTiles++;
+                    // Gate A (§7.11.6): panel = 4 out x 16 batch x 32 K.
+                    //   가중치는 batch 축에 공유되므로 int16 후보 = 2 x sym_ops
+                    //   (8 lane x 2 vector = 16 batch),  production = 256 명령/K-block
+                    //   eligible <=> sym_ops < 128  (부대비용 0 이라는 최대 낙관)
+                    gaTotal++;
+                    if (st.ops < 128) gaEligible++;
+                    if (st.ops < gaMin) gaMin = st.ops;
+                    gaHist[st.ops < 256 ? st.ops/16 : 15]++;
                 }
             }
             pBase[pr.name] += base_ops; pOps[pr.name] += act_ops; pTiles[pr.name] += nTiles;
@@ -342,6 +352,24 @@ done:
         fprintf(fs, "%s\t%lld\t%lld\t%lld\t%.4f\n", kv.first.c_str(),
                 pTiles[kv.first], kv.second, pOps[kv.first], red);
         printf("%-6s tiles=%-10lld reduction=%.2f%%\n", kv.first.c_str(), pTiles[kv.first], red*100);
+    }
+    // ── Gate A 판정 ──
+    {
+        const double p = gaTotal ? (double)gaEligible / gaTotal : 0.0;
+        printf("\n=== Gate A: eligible panel 비율 (sym_ops < 128) ===\n");
+        printf("  total=%lld  eligible=%lld  p=%.4f%%  min_sym=%d\n",
+               gaTotal, gaEligible, p*100.0, gaMin);
+        printf("  E_max = 1/(1-p) = %.4fx     (선택 panel 비용 0 가정)\n", 1.0/(1.0-p));
+        printf("  1.35x 필요 p >= 25.93%%  ->  %s\n",
+               p >= 0.2593 ? "통과" : "*** 종료 ***");
+        printf("\n  sym_ops 분포 (16 구간):\n");
+        for (int i = 0; i < 16; i++)
+            if (gaHist[i]) printf("    [%3d,%3d) %10lld  %5.2f%%\n",
+                                  i*16, (i+1)*16, gaHist[i], 100.0*gaHist[i]/gaTotal);
+        FILE *fg = fopen((std::string(outDir) + "/gate_a.tsv").c_str(), "w");
+        fprintf(fg, "total\teligible\tp\tE_max\tmin_sym\n%lld\t%lld\t%.6f\t%.4f\t%d\n",
+                gaTotal, gaEligible, p, 1.0/(1.0-p), gaMin);
+        fclose(fg);
     }
     fclose(fs); fclose(fl); fclose(fn);
     munmap((void *)base, sb.st_size); close(fd);

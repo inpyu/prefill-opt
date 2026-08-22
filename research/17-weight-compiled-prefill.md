@@ -1352,7 +1352,12 @@ widening 이 필요하다. lane 은 16 이 아니라 8 또는 4 다.
 
 1.35× 를 넘으려면 **약 190 명령 이하** 여야 한다(이전 판의 220 보다 엄격).
 
-**pure replacement 는 명확히 미달이다.**
+> **pure replacement 는 instruction-count lower bound 에서 0.776× 로 불리하다.
+> 최종 cycle-level 기각은 ISA throughput 과 dependency 를 반영한 1b-1 이후 확정한다.**
+
+⚠️ `330` 은 실제 panel 별 lowering 결과가 아니라 descriptor/TBL 비용을 가정한
+**optimistic instruction estimate** 다. "정확한 lower bound" 가 아니다.
+instruction 수 ≠ cycle 수 이므로 이것만으로 공식 기각하지 않는다.
 
 ### 7.11.4 hybrid 는 아직 열려 있으나 coverage gate 를 바꿔야 한다
 
@@ -1392,7 +1397,62 @@ int16 widen-add / int32 widen-add / TBL / SDOT–TBL mixed 를 lower 하고, **c
 add, TBL 과 shuffle, load 와 descriptor load, SDOT–load/TBL interleave, register
 24/28/32 에서 spill. 이것으로 feature vector 를 cycle 로 변환한다.
 
-**최종 gate** — 모두 만족할 때만 prototype 으로 간다.
+#### Gate A — 가장 값싼 상한 (ISA 비용 불필요)
+
+비-SDOT 경로를 선택할 수 있는 panel 비율을 `p` 라 하면, **선택된 panel 을 무한히 빠르게
+만들어도**
+
+    E_max = 1 / (1 − p)
+
+전체 1.35× 를 내려면 최소
+
+    p ≥ 1 − 1/1.35 = **25.93%**
+
+    비-SDOT eligible panel < 25.93%
+      → 선택 panel 비용을 0 으로 가정해도 전체 1.35× 불가능
+      → 즉시 종료
+
+**이것이 range-aware counter 의 가장 값싼 기각 경로다.**
+
+#### 단계별 gate
+
+    Gate A: eligible coverage < 25.93%          → 종료 (ISA 비용 불필요)
+    Gate B: 무한가속 coverage 상한 < 1.35×      → 종료
+    Gate C: ISA optimistic aggregate < 1.35×    → 종료
+    Gate D: descriptor 평균 > 7.2 B/panel       → 종료
+    Gate E: live registers > 28                 → 종료
+
+Q4 weight panel 은 72 B(4×32 weight = 4 blocks × 18 B)이므로 descriptor 증가 10% 는
+평균 **7.2 B/panel** 이다.
+
+#### 후보 basis 는 결과 확인 **전에** 고정한다
+
+    Dense SDOT / Zero·sign specialized / Int16 widen-add / TBL / SDOT–TBL mixed
+
+결과를 본 뒤 후보를 추가하면 탐색 편향이 생긴다.
+
+#### exact range 분석
+
+Q4 block 내부 dot 의 최악 범위:
+
+    32 × 127 × 8 = 32,512 < 32,767
+
+따라서 **Q4 block 내부에서는 int16 exact 경로가 원칙적으로 가능**하다.
+이후 FP32 scale 적용 순서는 baseline 과 동일하게 유지한다(§7.7.4).
+
+#### 최종 aggregate — `B=16` 과 `B=32` 를 따로
+
+    E_pred(B) = Σ_t C_SDOT(t,B) / ( C_dispatch(B) + Σ_t min_b C(t,b,B) )
+
+projection 별 단순 평균이 아니라 **실제 호출 횟수와 tile 수로 가중**한다.
+
+#### 시간 제한
+
+    반나절   range/coverage counter + Gate A·B
+    반나절   통과할 때만 ISA primitive 측정
+    Gate A 또는 B 실패 시 즉시 종료. 하루를 넘겨 prototype 을 작성하지 않는다.
+
+**기존 최종 gate** — 모두 만족할 때만 prototype 으로 간다.
 
     optimistic aggregate upper bound ≥ 1.35×
     descriptor 증가 ≤ 10%
@@ -1401,6 +1461,50 @@ add, TBL 과 shuffle, load 와 descriptor load, SDOT–load/TBL interleave, regi
     비-SDOT 선택 panel 이 실제로 존재
 
 **optimistic upper bound 조차 1.35× 미만이면 즉시 종료한다.**
+
+### 7.11.7 Gate A 결과 — **hybrid 종료** (ISA 비용 불필요)
+
+`artifacts/wcep_1a/gate_a.tsv`. panel = 4 output × 16 batch × 32 K.
+int16 exact 경로에서 후보 비용 = `2 × sym_ops`(8 lane × 2 vector = 16 batch),
+production = 256 명령/K-block. 따라서 **eligible ⟺ `sym_ops < 128`**
+(부대비용 0 이라는 최대 낙관 가정).
+
+    total       54,525,952 panel
+    eligible     2,762,555
+    p =          5.07%        (필요 25.93%)
+    min_sym      13
+    E_max = 1/(1−p) = 1.0534×
+
+**선택된 panel 을 무한히 빠르게 만들어도 전체 1.053× 가 상한이다.**
+
+#### `sym_ops` 분포 — 유리한 꼬리가 없다
+
+| 구간 | panel 수 | 비율 |
+|---|---|---|
+| [ 96,112) | 114,717 | 0.21% |
+| [112,128) | 2,536,580 | 4.65% |
+| **[128,144)** | **37,650,798** | **69.05%** |
+| [144,160) | 14,099,732 | 25.86% |
+| [160,176) | 12,867 | 0.02% |
+
+**95% 가 `sym_ops` 128~160 에 몰려 있다.** 평균 139 근처의 매우 좁은 분포이며,
+eligible 경계(128) 아래는 5% 뿐이다.
+
+hybrid 가 활용할 **"유리한 꼬리" 가 존재하지 않는다.** §7.10.3 에서 절약률이
+projection 간 45.4~46.9% 로 균일했던 것이 tile 수준에서도 그대로다 — Q4_0 의 값
+분포가 균질해서 tile 마다 절약 여지가 거의 같다.
+
+#### 판정
+
+    Gate A: eligible 5.07% < 25.93%   →  종료
+
+**Gate C(ISA optimistic aggregate)·D(descriptor)·E(register) 는 수행하지 않는다.**
+산술만으로 닫혔다. §7.11.6 의 시간 제한("Gate A 실패 시 즉시 종료")대로다.
+
+이로써 **range-aware hybrid 도 종료**된다. pure replacement 는 instruction-count 에서
+불리했고(0.776×), hybrid 는 **적용 가능한 panel 자체가 5% 뿐**이다.
+
+---
 
 ---
 
@@ -1415,7 +1519,8 @@ add, TBL 과 shuffle, load 와 descriptor load, SDOT–load/TBL interleave, regi
 | 0c 정확성 기준선 | 통과 — gate 확정 |
 | 0d null 사전등록 | 완료 |
 | **1a weight-aware** | **기각** — tile_hist Δ = −0.37 %p (기준 ≥10 %p) |
-| **1b-0 lower bound** | **재평가 중** — 최초 0.856× 는 batch 축 누락으로 철회(§7.11.1). steady-state 재계산 시 pure replacement 0.776×, hybrid 경로는 1b-0R 진행 |
+| **1b-0 pure replacement** | instruction-count 에서 **0.776×** (§7.11.3). cycle-level 기각은 미확정 |
+| **1b-0R range-aware hybrid** | **종료** — Gate A: eligible panel 5.07% (필요 25.93%), `E_max = 1.053×` (§7.11.7) |
 
 §19 의 go/no-go 표에서 두 항목이 No-go 다.
 
@@ -1424,8 +1529,9 @@ add, TBL 과 shuffle, load 와 descriptor load, SDOT–load/TBL interleave, regi
 
 **§19 대로 WCEP 를 DerivePP 의 새 중심 기여로 만들지 않는다.**
 
-⚠️ 단 `1b-0` 항목은 **재평가 중**이다. pure replacement 는 명확히 기각(0.776×)이나
-range-aware hybrid 는 1b-0R 결과를 기다린다. weight-aware 기각(1a)은 변함없다.
+**두 경로가 모두 닫혔다.** weight-aware 는 matched null 로(1a), hybrid 는 무한가속
+상한으로(Gate A) 기각됐다. pure replacement 의 cycle-level 기각만 미확정이나,
+hybrid 가 닫힌 이상 실익이 없다.
 
 ### 7.12.2 논문에서의 위치
 
