@@ -95,6 +95,10 @@ enum NnOpCode {
     // 토큰 가지치기 + 압축. enum 끝에 추가해야 기존 op 코드 번호가 밀리지 않는다
     // (워커로 직렬화되는 값이다).
     OP_PRUNE_TOKENS,
+    // SharedPack-SDOT (research/18 §6d). Q80 활성화를 block_q8_0x4 로 **한 번만**
+    // 재배치해 여러 스레드가 공유한다. 기존에는 matmul 안에서 스레드마다 전체를
+    // 중복 변환했고, K 가 길면(Down, K=14336) 4스레드 확장이 1.68배 무너졌다.
+    OP_PACK_Q80X4,
 };
 
 enum NnOpQuantType {
@@ -239,7 +243,14 @@ typedef struct {
     NnUint nExperts;
     NnUint nActiveExperts;
     NnUint activeExpertIndexesBufferIndex;
+    // SharedPack-SDOT (research/18 §6d).
+    // OP_PACK_Q80X4 가 만든 공유 block_q8_0x4 버퍼의 인덱스.
+    // NN_NO_PREPACK 이면 기존처럼 스레드마다 중복 변환한다(fallback 유지).
+    NnUint prepackedBufferIndex;
 } NnMatmulOpConfig;
+
+// prepackedBufferIndex 가 이 값이면 공유 버퍼를 쓰지 않는다.
+#define NN_NO_PREPACK 0xFFFFFFFFu
 
 typedef struct {
     NnRopeType type;
@@ -294,6 +305,13 @@ typedef struct {
 typedef struct {
     // empty
 } NnCastOpCodeConfig;
+
+// SharedPack-SDOT (research/18 §6d).
+// Q80 활성화를 block_q8_0x4 로 재배치한다. 네 스레드가 batch-row group 을 나눠
+// **하나의 공유 버퍼**에 쓰고, executor 의 op 경계가 barrier 역할을 한다.
+typedef struct {
+    // empty
+} NnPackQ80x4OpCodeConfig;
 
 typedef struct {
     // empty

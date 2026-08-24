@@ -1981,6 +1981,38 @@ static void matmulForward_F32_F32_F32(NnUint nThreads, NnUint threadIndex, NnUin
 //   - 배치 4의 배수 부분: 활성화를 block_q8_0x4 로 옮겨 gemm
 //   - 나머지 행(및 decode batch=1): 평범한 Q80 을 그대로 gemv
 // 실측 3.0~3.2x (Cortex-A76 4스레드, batch 32).
+// ── SharedPack-SDOT: Q80 -> block_q8_0x4 공유 재배치 (research/18 §6d) ──
+//
+// 왜 별도 op 인가:
+//   기존에는 matmulForward_repack 이 **스레드마다 전체 활성화를 중복 변환**했다.
+//   스레드가 출력 열로 나뉘어 모두 배치 전체를 필요로 하는데 op 내부 배리어가
+//   없기 때문이다. K 가 길면(Down, K=14336) 네 개의 독립 cache footprint 가
+//   생겨 4스레드 확장이 무너진다 — 실측 198.7 vs 공유 333.8 GOPS (1.68x).
+//
+//   op 로 분리하면 executor 의 op 경계가 barrier 를 제공하므로, 네 스레드가
+//   서로 다른 batch-row group 을 **하나의 버퍼**에 병렬로 쓸 수 있다.
+//
+// 출력 레이아웃은 커널이 기대하는 것과 동일하다: [group][kBlocks] (group = 4행 묶음).
+static void packQ80x4Forward(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+#if NN_REPACK_AVAILABLE
+    const NnUint kElems = context->inputSize.y;
+    const NnUint kBlocks = kElems / Q40_BLOCK_SIZE;
+    const NnBlockQ80 *in = (const NnBlockQ80 *)context->input[0];
+    block_q8_0x4 *out = (block_q8_0x4 *)context->output[0];
+
+    // 4행 배수만 pack 한다. 나머지 1~3행은 matmul 이 원본 Q80 으로 gemv fallback.
+    const NnUint nGroups = batchSize / 4u;
+    if (nGroups == 0u)
+        return;
+    const NnUint g0 = (NnUint)((std::size_t)nGroups * threadIndex / nThreads);
+    const NnUint g1 = (NnUint)((std::size_t)nGroups * (threadIndex + 1u) / nThreads);
+    for (NnUint g = g0; g < g1; g++)
+        nnPackQ80To4x4(&in[(std::size_t)g * 4u * kBlocks], &out[(std::size_t)g * kBlocks], kBlocks);
+#else
+    (void)nThreads; (void)threadIndex; (void)batchSize; (void)context;
+#endif
+}
+
 static bool matmulForward_repack(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
 #if NN_REPACK_AVAILABLE
     if (!context->isRepacked ||
@@ -2022,14 +2054,23 @@ static bool matmulForward_repack(NnUint nThreads, NnUint threadIndex, NnUint bat
         // 중복 비용은 무시할 수준이다. batch 32 / k 4096 기준 스레드당 ~139 kB 셔플인데,
         // 같은 op 의 가중치 읽기는 수십 MB 다. 반대로 "행"으로 나누면 배리어는 없어지지만
         // 모든 스레드가 가중치 전체를 읽어 가중치 트래픽이 nThreads 배가 된다.
+        // SharedPack-SDOT: OP_PACK_Q80X4 가 이미 만들어 둔 공유 버퍼가 있으면 그것을 쓴다.
+        // 없으면(기존 그래프·DLLAMA_REPACK=0) 아래 thread_local 스크래치로 fallback.
+        const NnMatmulOpConfig *mmCfg = (const NnMatmulOpConfig *)context->opConfig;
+        const block_q8_0x4 *xr;
         thread_local std::vector<NnByte> scratch;
-        const std::size_t need = (std::size_t)(nGemm / 4u) * kBlocks * sizeof(block_q8_0x4);
-        if (scratch.size() < need)
-            scratch.resize(need);
-        block_q8_0x4 *xr = (block_q8_0x4 *)scratch.data();
-
-        for (NnUint g = 0; g < nGemm / 4u; g++)
-            nnPackQ80To4x4(&x80[(std::size_t)g * 4u * kBlocks], &xr[(std::size_t)g * kBlocks], kBlocks);
+        if (mmCfg != nullptr && mmCfg->prepackedBufferIndex != NN_NO_PREPACK) {
+            xr = (const block_q8_0x4 *)context->buffers[mmCfg->prepackedBufferIndex]
+                 + (std::size_t)(rowBegin / 4u) * kBlocks;
+        } else {
+            const std::size_t need = (std::size_t)(nGemm / 4u) * kBlocks * sizeof(block_q8_0x4);
+            if (scratch.size() < need)
+                scratch.resize(need);
+            block_q8_0x4 *tmp = (block_q8_0x4 *)scratch.data();
+            for (NnUint g = 0; g < nGemm / 4u; g++)
+                nnPackQ80To4x4(&x80[(std::size_t)g * 4u * kBlocks], &tmp[(std::size_t)g * kBlocks], kBlocks);
+            xr = tmp;
+        }
 
         ggml_gemm_q4_0_4x4_q8_0((int)kElems, &out[c0], d, wCol, xr, (int)nGemm, (int)cN);
     }
@@ -2665,6 +2706,8 @@ NnCpuOpForwardInit getCpuOpForwardInit(NnOpCode code, NnOpQuantType quantType) {
         return initRepeatZForward;
     if (code == OP_MOE_GATE)
         return initMoeGateForward;
+    if (code == OP_PACK_Q80X4)
+        return nullptr;
     return nullptr;
 }
 
@@ -2720,6 +2763,9 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType) {
     }
     if (code == OP_REPEAT_Z) {
         if (quantType == F32_F32_Q80) return repeatZForward_F32_Q80;
+    }
+    if (code == OP_PACK_Q80X4) {
+        if (quantType == Q80_Q80_Q80) return packQ80x4Forward;
     }
     if (code == OP_SHIFT) {
         if (quantType == F32_F32_F32) return shiftForward_F32_F32;

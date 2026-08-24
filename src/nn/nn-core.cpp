@@ -91,6 +91,7 @@ const char *opCodeToString(NnOpCode code) {
     if (code == OP_MATMUL_ARGMAX) return "MATMUL_ARGMAX";
     if (code == OP_ARGMAX_REDUCE) return "ARGMAX_REDUCE";
     if (code == OP_MOE_GATE) return "MOE_GATE";
+    if (code == OP_PACK_Q80X4) return "PACK_Q80X4";
     throw std::invalid_argument("Unknown op code: " + std::to_string(code));
 }
 

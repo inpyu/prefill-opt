@@ -450,19 +450,19 @@ LlmNet buildLlmNet(
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, qBufferIndex),
                 size2D(h->weightType, n.qSlice.n, n.qSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
             att.addOp(
                 OP_MATMUL, "block_matmul_k", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, kTempBufferIndex),
                 size2D(h->weightType, n.kSlice.n, n.kSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
             att.addOp(
                 OP_MATMUL, "block_matmul_v", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, vTempBufferIndex),
                 size2D(h->weightType, n.vSlice.n, n.vSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
 
             if (h->archType == QWEN3 || h->archType == QWEN3_MOE) {
                 att.addOp(OP_INV_RMS, "block_norm_pre_q", layerIndex,
@@ -543,7 +543,7 @@ LlmNet buildLlmNet(
                 pointerBatchConfig(SRC_BUFFER, zqSliceBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, yBufferIndex),
                 size2D(h->weightType, n.woSlice.n0, n.woSlice.d),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
             att.addOp(
                 OP_CAST, "block_cast_d", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yBufferIndex),
@@ -596,7 +596,7 @@ LlmNet buildLlmNet(
                     pointerBatchConfig(SRC_BUFFER, yBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, moeGtBufferIndex),
                     n.moeGateSize,
-                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
                 ff.addOp(
                     OP_SOFTMAX, "block_moe_softmax", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, moeGtBufferIndex),
@@ -614,13 +614,13 @@ LlmNet buildLlmNet(
                     pointerBatchConfig(SRC_BUFFER, moeYqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, moeDBufferIndex),
                     size3D(h->weightType, h->nExperts, n.w1Slice.n, n.w1Slice.d0),
-                    NnMatmulOpConfig{h->nExperts, h->nActiveExperts, moeExpertIndexesBufferIndex});
+                    NnMatmulOpConfig{h->nExperts, h->nActiveExperts, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
                 ff.addOp(
                     OP_MATMUL, "block_matmul_w3", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, moeYqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, moeLBufferIndex),
                     size3D(h->weightType, h->nExperts, n.w3Slice.n, n.w3Slice.d0),
-                    NnMatmulOpConfig{h->nExperts, h->nActiveExperts, moeExpertIndexesBufferIndex});
+                    NnMatmulOpConfig{h->nExperts, h->nActiveExperts, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
                 ff.addOp(
                     OP_SILU, "block_act", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, moeDBufferIndex),
@@ -646,7 +646,7 @@ LlmNet buildLlmNet(
                     pointerBatchConfig(SRC_BUFFER, moeDQBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, moeYBufferIndex),
                     size3D(h->weightType, h->nExperts, n.w2Slice.n0, n.w2Slice.d),
-                    NnMatmulOpConfig{h->nExperts, h->nActiveExperts, moeExpertIndexesBufferIndex});
+                    NnMatmulOpConfig{h->nExperts, h->nActiveExperts, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
                 ff.addOp(
                     OP_SCALE, "block_moe_scale", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, moeYBufferIndex),
@@ -673,13 +673,13 @@ LlmNet buildLlmNet(
                     pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, dBufferIndex),
                     size2D(h->weightType, n.w1Slice.n, n.w1Slice.d0),
-                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
                 ff.addOp(
                     OP_MATMUL, "block_matmul_w3", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, lBufferIndex),
                     size2D(h->weightType, n.w3Slice.n, n.w3Slice.d0),
-                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
                 ff.addOp(
                     OP_SILU, "block_act", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, dBufferIndex),
@@ -705,7 +705,7 @@ LlmNet buildLlmNet(
                     pointerBatchConfig(SRC_BUFFER, dqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, yBufferIndex),
                     size2D(h->weightType, n.w2Slice.n0, n.w2Slice.d),
-                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex});
+                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
             }
             ff.addOp(
                 OP_CAST, "block_cast_d3", layerIndex,
@@ -778,7 +778,7 @@ LlmNet buildLlmNet(
                     pointerBatchedSliceConfig(SRC_BUFFER, yqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, argmaxPartialBufferIndex),
                     size2D(h->weightType, n.wclsSlice.n0, n.wclsSlice.d),
-                    NnMatmulOpConfig{});
+                    NnMatmulOpConfig{0u, 0u, 0u, NN_NO_PREPACK});
                 end.addOp(
                     OP_ARGMAX_REDUCE, "final_reduce_argmax", 0,
                     pointerBatchConfig(SRC_BUFFER, argmaxPartialBufferIndex),
@@ -791,7 +791,7 @@ LlmNet buildLlmNet(
                     pointerBatchedSliceConfig(SRC_BUFFER, yqBufferIndex),
                     pointerBatchConfig(SRC_PIPE, n.logitsPipeIndex),
                     size2D(h->weightType, n.wclsSlice.n0, n.wclsSlice.d),
-                    NnMatmulOpConfig{});
+                    NnMatmulOpConfig{0u, 0u, 0u, NN_NO_PREPACK});
             }
             end.addSync(n.logitsPipeIndex, SYNC_NODE_SLICES);
 
