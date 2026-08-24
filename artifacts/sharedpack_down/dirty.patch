@@ -1,0 +1,206 @@
+diff --git a/artifacts/sharedpack/n1_B16.log b/artifacts/sharedpack/n1_B16.log
+index e69de29..20403c1 100644
+--- a/artifacts/sharedpack/n1_B16.log
++++ b/artifacts/sharedpack/n1_B16.log
+@@ -0,0 +1,112 @@
++📦 ControlPacket size: 2444 bytes
++📄 AddBos: 0
++📄 BosId: 128000 (<|begin_of_text|>)
++📄 EosId: 128001 (<|end_of_text|>) 128009 (<|eot_id|>) 
++📄 RegularVocabSize: 128000
++📄 SpecialVocabSize: 256
++💡 Arch: Llama
++💡 HiddenAct: Silu
++💡 Dim: 4096
++💡 HeadDim: 128
++💡 QDim: 4096
++💡 KvDim: 1024
++💡 HiddenDim: 14336
++💡 VocabSize: 128256
++💡 nLayers: 32
++💡 nHeads: 32
++💡 nKvHeads: 8
++💡 OrigSeqLen: 8192
++💡 SeqLen: 1024
++💡 NormEpsilon: 0.000010
++💡 RopeType: Llama
++💡 RopeTheta: 500000
++📀 RequiredMemory: 6326 MB
++🧠 CPU: neon dotprod fp16
++💿 Loading weights...
++💿 Loaded 25/32
++💿 Loaded 26/32
++💿 Loaded 27/32
++💿 Loaded 28/32
++💿 Loaded 29/32
++💿 Loaded 30/32
++💿 Loaded 31/32
++💿 Loaded 32/32
++💿 Weights loaded
++is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces
++🔷️ Eval  877 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  871 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  874 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  918 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  878 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  912 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  923 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval 1061 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  914 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  913 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  916 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  943 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  933 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  955 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  979 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  953 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  958 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  959 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  964 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  985 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  971 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval 1031 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  980 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  990 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval  990 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval 1005 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval 1008 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++🔷️ Eval 1020 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (16 tokens)
++  logitsDump: artifacts/sharedpack/logits_N1_B16.bin (128256 floats)
++🔶 Pred  618 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  612 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  614 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  618 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  618 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  617 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  619 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  614 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  620 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  623 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  621 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  622 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++🔶 Pred  617 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  Heller
++
++Evaluation
++   nBatches: 16
++ prefillChunks: 28 (avg 16.00 tok/chunk)
++    nTokens: 447
++   tokens/s: 16.74 (59.72 ms/tok)
++Prediction
++    nTokens: 13
++   tokens/s: 1.62 (618.57 ms/tok)
++Timing
++  prefillMs: 26722.20
++ syncWaitMs: 0.00
++ syncXferMs: 0.00
++     ttftMs: 27341.58
++   decodeMs: 8051.18
++    totalMs: 34773.38
++WallMetrics
++ wall_tpot_ms: 619.32
++wall_decode_tps: 1.61
++TTFTBreakdown
++     prefillEndMs: 26722.20
++firstDecodeStartMs: 26722.23
++ firstDecodeDoneMs: 27341.48
++   firstTokenEmitMs: 27341.58
++TrafficBreakdown
++      kvTxMB: 0.00
++      kvRxMB: 0.00
++activationTxMB: 0.00
++activationRxMB: 0.00
++kvMigrationViolations: 0
++Scheduling
++ bubbleRatioEstDecode: 0.000
++queueWaitPrefillMs: 0.00
++ queueWaitDecodeMs: 0.00
++ prefillSlotCount: 0
+diff --git a/artifacts/sharedpack/n1_B32.log b/artifacts/sharedpack/n1_B32.log
+index b36ae2e..e69de29 100644
+--- a/artifacts/sharedpack/n1_B32.log
++++ b/artifacts/sharedpack/n1_B32.log
+@@ -1,25 +0,0 @@
+-📦 ControlPacket size: 2444 bytes
+-📄 AddBos: 0
+-📄 BosId: 128000 (<|begin_of_text|>)
+-📄 EosId: 128001 (<|end_of_text|>) 128009 (<|eot_id|>) 
+-📄 RegularVocabSize: 128000
+-📄 SpecialVocabSize: 256
+-💡 Arch: Llama
+-💡 HiddenAct: Silu
+-💡 Dim: 4096
+-💡 HeadDim: 128
+-💡 QDim: 4096
+-💡 KvDim: 1024
+-💡 HiddenDim: 14336
+-💡 VocabSize: 128256
+-💡 nLayers: 32
+-💡 nHeads: 32
+-💡 nKvHeads: 8
+-💡 OrigSeqLen: 8192
+-💡 SeqLen: 1024
+-💡 NormEpsilon: 0.000010
+-💡 RopeType: Llama
+-💡 RopeTheta: 500000
+-📀 RequiredMemory: 6350 MB
+-🧠 CPU: neon dotprod fp16
+-🚨 Critical error: Unsupported CPU op code: PACK_Q80X4, quant: Q80_Q80_F32, op name: block_pack_dq
+diff --git a/research/19-sharedpack-implementation.md b/research/19-sharedpack-implementation.md
+index 88d18df..4cfabd7 100644
+--- a/research/19-sharedpack-implementation.md
++++ b/research/19-sharedpack-implementation.md
+@@ -180,6 +180,54 @@ executor 버퍼는 `nBatches` 기준으로 잡히므로 **최대 배치로 할
+ 
+ ---
+ 
++## 4b. 측정 결과 — Down 1.60×, 정확성 통과
++
++### 정확성: 통과
++
++    B=16 x2,  B=32 x2   전부 8b8178a50a97   (reference 와 일치)
++
++네 가지가 동시에 확인됐다.
++
++1. `packQ80x4Forward` 가 기존 중복 변환과 **바이트 단위 동일**
++2. 스레드 group 분할 경계(`g0 = nG*t/T`)에 누락·중복 없음
++3. `d_pack` 버퍼 선형 접근 가정이 맞음
++4. **executor op 경계가 실제로 barrier 역할을 한다** — 가정이었는데 검증됨
++
++### 성능: op profile (wave off, `--stage-timing 1`, S=447, B=32)
++
++| op | baseline | SharedPack | 변화 |
++|---|---|---|---|
++| **block_matmul_w2 (Down)** | 10,111.6 | **6,326.4** | **1.60×** |
++| block_pack_dq | — | **11.0** | 신규, 전체의 **0.04%** |
++| block_matmul_w1 (Gate) | 6,728.7 | 6,731.7 | 1.000 (대조군) |
++| block_matmul_w3 (Up) | 6,761.4 | 6,599.0 | 1.025 (대조군) |
++| **total** | 34,346.5 | **30,241.4** | **1.136×** |
++
++- **사전등록 기준 통과** — Down `≥1.45×` 통과, 목표 `≥1.60×` 도달.
++  벤치의 1.68× 와 부합한다(production 은 pack op 오버헤드가 있어 약간 낮다).
++- **pack 오버헤드 우려 해소** — 11.0 ms, 전체의 0.04%. 기존에는 4스레드가 각자
++  전체를 변환했는데 나눠서 한 번만 하니 거의 공짜다.
++- **회귀 없음** — 미적용 projection 이 1.000 / 1.025 로 불변. Down 개선이 우연이
++  아님도 뒷받침한다.
++
++### ⚠️ E2E 는 이 기기에서 판별되지 않는다
++
++wave 를 켠 E2E 측정:
++
++    B=32   SharedPack 30,069 / 29,933   baseline 31,208 / 30,107 / 29,637   → 1.004×
++    B=16   SharedPack 26,722 / 30,365 / 40,370  (편차 **51%**)              → 중앙값 1.10×
++
++**연산은 1.136× 빨라졌으나 wave 실행에서 그 이득이 묻힌다.** 이 기기의 E2E 편차가
++최대 51% 이므로 단일·소수 측정으로는 판별할 수 없다.
++
++> ⚠️ 첫 단일 측정(26,722 = 1.25×)만 보고 "사전등록 기준 초과" 라고 판단했다가
++> 철회했다. **이 기기에서 E2E 성능은 anchor 설계 없이 판단하지 않는다.**
++> op profile 은 op 시간의 직접 합이라 훨씬 안정적이다.
++
++E2E 확정에는 §16 의 anchor 설계(정순/역순 교차, `flock` 배타 실행)가 필요하다.
++
++---
++
+ ## 5. 계측 도구 (이미 구현됨)
+ 
+ | 도구 | 용도 |
