@@ -11,7 +11,11 @@
 | **[11-results.md](11-results.md)** | **성과 요약 — 여기부터 읽으면 된다** |
 | **[12-findings.md](12-findings.md)** | 발견 목록 (#1~#14) + 기각된 가설 |
 | **[13-methodology.md](13-methodology.md)** | 측정 방법론 — 게이트, 교차 실행, 계측 |
-| **[17-weight-compiled-prefill.md](17-weight-compiled-prefill.md)** | **새 연산 연구 계획 — 실제 Q4 weight를 exact CPU 산술 DAG로 컴파일하는 WCEP** |
+| **[16-derivepp.md](16-derivepp.md)** | **논문 본문 — 세 시스템 확장 곡선 비교(4.57~4.68×), 축 판별, 기각 기록** |
+| **[20-measurement-environment.md](20-measurement-environment.md)** | **측정 환경과 방법론 — 새 실험 전에 먼저 읽는다 (SD 카드·편차·반복된 실수)** |
+| **[19-sharedpack-implementation.md](19-sharedpack-implementation.md)** | **SharedPack-SDOT 구현 — 연산 계층 최적화, op 누적 1.205×** |
+| [18-compute-path.md](18-compute-path.md) | 연산 경로 분석 — QCFuse/KP-SDOT 기각, 병목을 SharedPack 으로 좁힌 과정 |
+| [17-weight-compiled-prefill.md](17-weight-compiled-prefill.md) | WCEP — weight-aware 컴파일. 사전등록 기준으로 **기각**된 negative result |
 | [06-baseline-status.md](06-baseline-status.md) | baseline 원본 기록 (상세 근거) |
 | [09-design-ring-cp.md](09-design-ring-cp.md) | **제안 알고리즘 설계 (최종)** |
 | [07-design-block-parallel.md](07-design-block-parallel.md) | 근사 노선 — 기각됨. 측정·분석은 유효 |
