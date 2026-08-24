@@ -245,7 +245,7 @@ SharedPack의 차이는 선명하지만, 온도 상승과 2.0~2.4 GHz DVFS가 �
 | [10-calibration-history.md](10-calibration-history.md) | calibration 설계가 바뀐 역사와 제거한 가정 |
 | [11-axis-cert.md](11-axis-cert.md) | scheduling 축 활성화 절차 — 현재 구현 우선순위는 아님 |
 | [12-cpu-compute-path.md](12-cpu-compute-path.md) | **현재 연산 방향의 근거** — 기각 결과와 K-sweep 교락 분리 |
-| [13-sharedpack-sdot.md](13-sharedpack-sdot.md) | **현재 구현 절차** — SharedPack 구조, 검증 gate, runtime blocker |
+| [13-sharedpack-sdot.md](13-sharedpack-sdot.md) | **현재 구현·결과** — SharedPack 구조, projection 확장, 정확성·성능 gate |
 | [14-performance-validation.md](14-performance-validation.md) | **현재 측정 해설** — anchor 보정, 열/DVFS, 계측 층위와 재현 artifact |
 
 ---

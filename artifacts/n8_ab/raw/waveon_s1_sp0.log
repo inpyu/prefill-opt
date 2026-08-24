@@ -1,0 +1,177 @@
+⚙️  Auto PP heuristic: using pp=8 sp=1 tp=1 (override with --pp-size/--sp-size or --auto-pp 0)
+📦 ControlPacket size: 2444 bytes
+🧱 PP 레이어 불균등 분할: 8 8 8 8 8 8 8 8
+🧱 node=0 ppRank=0 sub=[0,8) layers=[0,4)
+🧱 node=1 ppRank=1 sub=[8,16) layers=[4,8)
+🧱 node=2 ppRank=2 sub=[16,24) layers=[8,12)
+🧱 node=3 ppRank=3 sub=[24,32) layers=[12,16)
+🧱 node=4 ppRank=4 sub=[32,40) layers=[16,20)
+🧱 node=5 ppRank=5 sub=[40,48) layers=[20,24)
+🧱 node=6 ppRank=6 sub=[48,56) layers=[24,28)
+🧱 node=7 ppRank=7 sub=[56,64) layers=[28,32)
+📄 AddBos: 0
+📄 BosId: 128000 (<|begin_of_text|>)
+📄 EosId: 128001 (<|end_of_text|>) 128009 (<|eot_id|>) 
+📄 RegularVocabSize: 128000
+📄 SpecialVocabSize: 256
+💡 Arch: Llama
+💡 HiddenAct: Silu
+💡 Dim: 4096
+💡 HeadDim: 128
+💡 QDim: 4096
+💡 KvDim: 1024
+💡 HiddenDim: 14336
+💡 VocabSize: 128256
+💡 nLayers: 32
+💡 nHeads: 32
+💡 nKvHeads: 8
+💡 OrigSeqLen: 8192
+💡 SeqLen: 1024
+💡 NormEpsilon: 0.000010
+💡 RopeType: Llama
+💡 RopeTheta: 500000
+📀 RequiredMemory: 2567 MB
+⭕ Root expects 7 workers
+⭕ Socket[0]: connecting to 165.194.19.113:9998 worker
+⭕ Socket[0]: waiting initial ACK from worker
+⭕ Socket[0]: connected
+⭕ Socket[1]: connecting to 165.194.19.191:9998 worker
+⭕ Socket[1]: waiting initial ACK from worker
+⭕ Socket[1]: connected
+⭕ Socket[2]: connecting to 165.194.19.103:9998 worker
+⭕ Socket[2]: waiting initial ACK from worker
+⭕ Socket[2]: connected
+⭕ Socket[3]: connecting to 165.194.19.94:9998 worker
+⭕ Socket[3]: waiting initial ACK from worker
+⭕ Socket[3]: connected
+⭕ Socket[4]: connecting to 165.194.19.104:9998 worker
+⭕ Socket[4]: waiting initial ACK from worker
+⭕ Socket[4]: connected
+⭕ Socket[5]: connecting to 165.194.19.54:9998 worker
+⭕ Socket[5]: waiting initial ACK from worker
+⭕ Socket[5]: connected
+⭕ Socket[6]: connecting to 165.194.19.96:9998 worker
+⭕ Socket[6]: waiting initial ACK from worker
+⭕ Socket[6]: connected
+⭕ Root: broadcasting root-ready ACK to all workers
+⭕ Network is initialized
+🧠 CPU: neon dotprod fp16
+💿 Loading weights...
+💿 Loaded 11/32
+💿 Loaded 12/32
+💿 Loaded 13/32
+💿 Loaded 14/32
+💿 Loaded 15/32
+💿 Loaded 16/32
+💿 Loaded 17/32
+💿 Loaded 18/32
+💿 Loaded 19/32
+💿 Loaded 20/32
+💿 Loaded 21/32
+💿 Loaded 22/32
+💿 Loaded 23/32
+💿 Loaded 24/32
+💿 Loaded 25/32
+💿 Loaded 26/32
+💿 Loaded 27/32
+💿 Loaded 28/32
+💿 Loaded 29/32
+💿 Loaded 30/32
+💿 Loaded 31/32
+💿 Loaded 32/32
+💿 Weights loaded
+🚁 Network is in non-blocking mode
+📡 Collective: auto (nNodes=8)
+🔀 Topology: pp=8 sp=1 tp=1
+🚚 Pipeline activation transport: F_Q80
+🛣️  Lanes: 1 (lane = full PP chain, G=floor(N/P)); root lane=0
+🔷 Prefill-only SP: on (threshold=256)
+🧷 KV affinity: strict=off allowMigration=on
+🫧 Prefill interleave: on (quota=8 decode steps)
+🧭 Stage timing: ENABLED (root/worker per-step recv/forward/send timing)
+is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces
+🌊 Wave pipelining enabled (pp=8)
+🌊 [R0] mb=0 batch=32 fs=0.0 fe=236.7
+🌊 [R0] mb=1 batch=32 fs=236.8 fe=475.6
+🌊 [R0] mb=2 batch=32 fs=475.6 fe=718.9
+🌊 [R0] mb=3 batch=32 fs=718.9 fe=983.1
+🌊 [R0] mb=4 batch=32 fs=983.1 fe=1226.7
+🌊 [R0] mb=5 batch=32 fs=1226.7 fe=1471.6
+🌊 [R0] mb=6 batch=32 fs=1471.6 fe=1725.4
+🌊 [R0] mb=7 batch=32 fs=1725.5 fe=1981.3
+🌊 [R0] mb=8 batch=32 fs=1981.3 fe=2389.8
+🌊 [R0] mb=9 batch=32 fs=2389.8 fe=2675.2
+🌊 [R0] mb=10 batch=32 fs=2675.2 fe=2941.8
+🌊 [R0] mb=11 batch=32 fs=2941.8 fe=3206.0
+🌊 [R0] mb=12 batch=32 fs=3206.0 fe=3468.9
+🌊 [R0] mb=13 batch=32 fs=3468.9 fe=3741.8
+⏳ [NET_STALL] tryReadSocket fd=10 stalled=2000ms pending=48B
+💧 [DRAIN] chunk=0 t=3935.6ms
+🔷️ Wave Eval  272 ms Sync    0 ms | Sent  2138 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx   1904/   501 kB | (14 chunks, 448 tokens)
+  logitsDump: /home/ubuntu/prefill-opt/artifacts/n8_ab/raw/waveon_lg_s1.bin (128256 floats)
+🧭 [ROOT_STAGE] phase=decode pos=447 exec=55782us recv_wait=515198us recv_wire=514955us recv_decode=236us total=571054us wire=513024B payload=513024B
+🔶 Pred   55 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  clock
+🧭 [ROOT_STAGE] phase=decode pos=448 exec=58223us recv_wait=520845us recv_wire=520626us recv_decode=214us total=579139us wire=513024B payload=513024B
+🔶 Pred   57 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  frequency
+🧭 [ROOT_STAGE] phase=decode pos=449 exec=58780us recv_wait=511950us recv_wire=511698us recv_decode=246us total=570799us wire=513024B payload=513024B
+🔶 Pred   58 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  uneven
+🧭 [ROOT_STAGE] phase=decode pos=450 exec=65791us recv_wait=520985us recv_wire=520752us recv_decode=231us total=586848us wire=513024B payload=513024B
+🔶 Pred   65 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB | ly
+🧭 [ROOT_STAGE] phase=decode pos=451 exec=57270us recv_wait=512940us recv_wire=512704us recv_decode=231us total=570286us wire=513024B payload=513024B
+🔶 Pred   57 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  across
+🧭 [ROOT_STAGE] phase=decode pos=452 exec=56322us recv_wait=516348us recv_wire=516108us recv_decode=237us total=572733us wire=513024B payload=513024B
+🔶 Pred   55 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  nodes
+
+Evaluation
+   nBatches: 32
+ prefillChunks: 14 (avg 32.00 tok/chunk)
+    nTokens: 447
+   tokens/s: 1640.92 (0.61 ms/tok)
+Prediction
+    nTokens: 6
+   tokens/s: 17.10 (58.49 ms/tok)
+Timing
+  prefillMs: 7678.53
+ syncWaitMs: 3924.00
+ syncXferMs: 13.15
+     attnMs: 0.00
+     gemmMs: 0.00
+   attnProjMs: 0.00
+        ffnMs: 0.00
+       normMs: 0.00
+     lmHeadMs: 0.00
+      otherMs: 0.00
+     ttftMs: 8249.76
+   decodeMs: 3452.01
+    totalMs: 11130.54
+WallMetrics
+ wall_tpot_ms: 575.34
+wall_decode_tps: 1.74
+CriticalPath
+root_recv_wait_p50_ms: 515.19
+root_recv_wait_p95_ms: 520.84
+TTFTBreakdown
+     prefillEndMs: 7678.53
+firstDecodeStartMs: 7678.55
+ firstDecodeDoneMs: 8249.61
+   firstTokenEmitMs: 8249.76
+TrafficBreakdown
+      kvTxMB: 0.00
+      kvRxMB: 0.00
+activationTxMB: 1.89
+activationRxMB: 3.43
+kvMigrationViolations: 0
+Scheduling
+ bubbleRatioEstDecode: 0.001
+queueWaitPrefillMs: 0.00
+ queueWaitDecodeMs: 0.00
+ prefillSlotCount: 0
+📦 Root link traffic summary
+📦 [NET_TRAFFIC] root<->worker[1] socket=0 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
+📦 [NET_TRAFFIC] root<->worker[2] socket=1 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
+📦 [NET_TRAFFIC] root<->worker[3] socket=2 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
+📦 [NET_TRAFFIC] root<->worker[4] socket=3 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
+📦 [NET_TRAFFIC] root<->worker[5] socket=4 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
+📦 [NET_TRAFFIC] root<->worker[6] socket=5 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
+📦 [NET_TRAFFIC] root<->worker[7] socket=6 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
+⭕ Network is closed

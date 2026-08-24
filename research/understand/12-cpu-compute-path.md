@@ -254,7 +254,7 @@ KP-SDOT prototype에서 panel 경계마다 F32 accumulator를 저장하고 다�
 
 ---
 
-## 7. SharedPack의 성능 상한과 아직 모르는 것
+## 7. Microbenchmark 상한에서 production 결과까지
 
 Down microbenchmark에서:
 
@@ -279,8 +279,21 @@ T_shared-production = T_pack-once + T_executor-boundary + T_GEMM(shared)
 ```
 
 Down 비중 29.44%에 kernel-only 1.68배를 적용하면 Down만으로 전체 약 1.129배가 상한이다.
-Gate/Up과 Q/K/V/O의 작은 이득까지 단순 합성한 사전 예상은 약 1.16배다. 이는 아직
-production 실측값이 아니라 **구현 목표를 정하기 위한 추정값**이다.
+Gate/Up과 Q/K/V/O까지 단순 합성한 사전 예상은 약 1.16배였다.
+
+이후 별도 pack op를 production graph에 넣고 Q/K/V, Gate/Up, Down으로 확장했다.
+
+```text
+Down pack-inclusive    약 1.64×
+pack 세 op 합          84.2 ms, 새 누적 op 시간의 0.30%
+기존 누적 op profile   34,346.5 → 28,511.0 ms = 1.205×
+N=1 B=16/B=32          테스트 6회 logits bit-identical
+```
+
+이 초기 1.205배 비교는 사전 예상을 넘었지만 서로 다른 세션에서 얻었고 decode-inclusive였다.
+현재는 동일 바이너리의 `DLLAMA_SHARED_PACK=0/1`, decode 전 `[PREFILL ONLY]` snapshot과
+paired anchor를 사용해 최종 수치를 재확정 중이다. 그러므로 1.205배는 구현 성공의 강한
+증거지만 최종 E2E 논문 수치로 아직 고정하지 않는다.
 
 ---
 
@@ -294,4 +307,4 @@ production 실측값이 아니라 **구현 목표를 정하기 위한 추정값*
 3. 기존 K-sweep만으로 cache-residency를 원인이라고 단정할 수 없었던 이유는 무엇인가?
 4. `shared` 대조군이 K=14,336에서도 평탄하다는 사실은 무엇을 반증하는가?
 5. 333.8 GOPS를 production 성능으로 바로 인용하면 안 되는 이유는 무엇인가?
-
+6. 초기 1.205배를 동일 바이너리 paired A/B로 다시 확인해야 하는 이유는 무엇인가?

@@ -374,10 +374,20 @@ LlmNet buildLlmNet(
         //   DLLAMA_SHARED_PACK=0  기존 private pack (baseline)
         //   DLLAMA_SHARED_PACK=1  SharedPack (기본)
         // 그래프만 바뀌고 커널·가중치·순서는 그대로다.
+        //   DLLAMA_SHARED_PACK=0  기존 private pack (baseline)
+        //   DLLAMA_SHARED_PACK=1  전체 (Q/K/V + Gate/Up + Down)
+        //   DLLAMA_SHARED_PACK=2  Down 만  — N=8 정확성 실패 이분용
+        //   DLLAMA_SHARED_PACK=3  y_pack 만 (Q/K/V + Gate/Up)
         const char *spEnv = std::getenv("DLLAMA_SHARED_PACK");
-        const bool sharedPackEnabled = (spEnv == nullptr) || (spEnv[0] != '0');
+        const int spMode = (spEnv == nullptr) ? 1 : atoi(spEnv);
+        const bool sharedPackEnabled = spMode != 0;
+        //   DLLAMA_SHARED_PACK=4  pack op 은 삽입하되 matmul 은 쓰지 않는다.
+        //     그래프 변경 자체가 정확성을 깨는지, pack 데이터가 깨는지 가른다.
+        const bool yPackAllowed = (spMode == 1) || (spMode == 3) || (spMode == 4);
+        const bool dPackAllowed = (spMode == 1) || (spMode == 2) || (spMode == 4);
+        const bool prepackUse = spMode != 4;
 
-        const bool yPackOn = sharedPackEnabled && (h->syncType == F_Q80) &&
+        const bool yPackOn = sharedPackEnabled && yPackAllowed && (h->syncType == F_Q80) &&
                              (h->dim % Q40_BLOCK_SIZE == 0u) &&
                              ((h->dim / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
         const NnUint yPackBufferIndex = yPackOn
@@ -385,12 +395,16 @@ LlmNet buildLlmNet(
                   (h->dim / Q40_BLOCK_SIZE) * 34u / 4u))
             : 0u;
 
-        const bool sharedPackOn = sharedPackEnabled && (h->syncType == F_Q80) &&
-                                  (n.w2Slice.d % Q40_BLOCK_SIZE == 0u) &&
-                                  ((n.w2Slice.d / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
+        // Down 의 K 는 w2Slice.n0 다. matmul_w2 는 size2D(t, n0, d) 로 선언되고
+        // size2D 의 첫 인자가 y, matmul 은 kElems = weightSize.y 를 쓴다.
+        // 처음에 w2Slice.d(=출력 4096)를 K 로 잡아 버퍼가 3.5배 작았다.
+        const NnUint w2K = n.w2Slice.n0;
+        const bool sharedPackOn = sharedPackEnabled && dPackAllowed && (h->syncType == F_Q80) &&
+                                  (w2K % Q40_BLOCK_SIZE == 0u) &&
+                                  ((w2K / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
         const NnUint dPackBufferIndex = sharedPackOn
             ? nodeBuilder.addBuffer("d_pack", size2D(F_32, nBatches,
-                  (n.w2Slice.d / Q40_BLOCK_SIZE) * 34u / 4u))
+                  (w2K / Q40_BLOCK_SIZE) * 34u / 4u))
             : 0u;
 
         // moe
@@ -498,19 +512,19 @@ LlmNet buildLlmNet(
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, qBufferIndex),
                 size2D(h->weightType, n.qSlice.n, n.qSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, (yPackOn && prepackUse) ? yPackBufferIndex : NN_NO_PREPACK});
             att.addOp(
                 OP_MATMUL, "block_matmul_k", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, kTempBufferIndex),
                 size2D(h->weightType, n.kSlice.n, n.kSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, (yPackOn && prepackUse) ? yPackBufferIndex : NN_NO_PREPACK});
             att.addOp(
                 OP_MATMUL, "block_matmul_v", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, vTempBufferIndex),
                 size2D(h->weightType, n.vSlice.n, n.vSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, (yPackOn && prepackUse) ? yPackBufferIndex : NN_NO_PREPACK});
 
             if (h->archType == QWEN3 || h->archType == QWEN3_MOE) {
                 att.addOp(OP_INV_RMS, "block_norm_pre_q", layerIndex,
@@ -733,14 +747,14 @@ LlmNet buildLlmNet(
                     pointerBatchConfig(SRC_BUFFER, dBufferIndex),
                     size2D(h->weightType, n.w1Slice.n, n.w1Slice.d0),
                     NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex,
-                        yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
+                        (yPackOn && prepackUse) ? yPackBufferIndex : NN_NO_PREPACK});
                 ff.addOp(
                     OP_MATMUL, "block_matmul_w3", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, lBufferIndex),
                     size2D(h->weightType, n.w3Slice.n, n.w3Slice.d0),
                     NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex,
-                        yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
+                        (yPackOn && prepackUse) ? yPackBufferIndex : NN_NO_PREPACK});
                 ff.addOp(
                     OP_SILU, "block_act", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, dBufferIndex),
@@ -778,7 +792,7 @@ LlmNet buildLlmNet(
                     pointerBatchConfig(SRC_BUFFER, yBufferIndex),
                     size2D(h->weightType, n.w2Slice.n0, n.w2Slice.d),
                     NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex,
-                        sharedPackOn ? dPackBufferIndex : NN_NO_PREPACK});
+                        (sharedPackOn && prepackUse) ? dPackBufferIndex : NN_NO_PREPACK});
             }
             ff.addOp(
                 OP_CAST, "block_cast_d3", layerIndex,

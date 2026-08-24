@@ -50,3 +50,11 @@ bench_steps
 calibrate
 calibrate_exec
 calibrate_layer
+
+# 로짓 덤프 (재생성 가능, md5 는 research 문서에 기록)
+artifacts/**/*.bin
+# prefill_bench 컴파일 산출물
+/bench_roofline
+/bench_shape
+/kp_sdot
+/wcep_scan

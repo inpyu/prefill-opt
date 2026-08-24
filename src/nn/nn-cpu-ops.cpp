@@ -1995,7 +1995,9 @@ static void matmulForward_F32_F32_F32(NnUint nThreads, NnUint threadIndex, NnUin
 // 출력 레이아웃은 커널이 기대하는 것과 동일하다: [group][kBlocks] (group = 4행 묶음).
 static void packQ80x4Forward(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
 #if NN_REPACK_AVAILABLE
-    const NnUint kElems = context->inputSize.y;
+    // size2D(floatType, y, x) — **y 가 행 수, x 가 폭**이다.
+    // 처음에 inputSize.y 를 K 로 읽어 kBlocks 가 1 이 됐다(행 수 32 / 32).
+    const NnUint kElems = context->inputSize.x;
     const NnUint kBlocks = kElems / Q40_BLOCK_SIZE;
     // input/output 은 배치 행 포인터 배열이다. pack 은 그룹(4행) 단위로 선형 접근하므로
     // 0번 행의 base 포인터에서 시작한다 — 버퍼가 연속이라는 전제이며,
@@ -2065,6 +2067,29 @@ static bool matmulForward_repack(NnUint nThreads, NnUint threadIndex, NnUint bat
         if (mmCfg != nullptr && mmCfg->prepackedBufferIndex != NN_NO_PREPACK) {
             xr = (const block_q8_0x4 *)context->buffers[mmCfg->prepackedBufferIndex]
                  + (std::size_t)(rowBegin / 4u) * kBlocks;
+            // 진단(DLLAMA_VERIFY_PACK=1): 공유 버퍼가 이 op 이 기대하는 것과 같은가.
+            // pack op 은 inputSize.y 로, matmul 은 weightSize.y 로 kBlocks 를 잡는다.
+            // 둘이 어긋나거나 쓰기가 누락되면 여기서 잡힌다.
+            static const bool verifyPack = []() {
+                const char *e = std::getenv("DLLAMA_VERIFY_PACK");
+                return e != nullptr && atoi(e) != 0;
+            }();
+            if (verifyPack && threadIndex == 0) {
+                static std::atomic<int> reported(0);
+                std::vector<NnByte> ref((std::size_t)(nGemm / 4u) * kBlocks * sizeof(block_q8_0x4));
+                block_q8_0x4 *rp = (block_q8_0x4 *)ref.data();
+                for (NnUint g = 0; g < nGemm / 4u; g++)
+                    nnPackQ80To4x4(&x80[(std::size_t)g * 4u * kBlocks], &rp[(std::size_t)g * kBlocks], kBlocks);
+                if (std::memcmp(ref.data(), xr, ref.size()) != 0 && reported.fetch_add(1) < 12) {
+                    const NnByte *a = (const NnByte *)xr;
+                    std::size_t i = 0;
+                    while (i < ref.size() && a[i] == ref[i]) i++;
+                    printf("🚨 [VERIFY_PACK] layer=%u kElems=%u d=%u batch=%u rowBegin=%u nGemm=%u "
+                           "kBlocks=%u inY=%u firstDiffByte=%zu/%zu\n",
+                        context->layerIndex, kElems, d, batchSize, rowBegin, nGemm,
+                        kBlocks, context->inputSize.y, i, ref.size());
+                }
+            }
         } else {
             const std::size_t need = (std::size_t)(nGemm / 4u) * kBlocks * sizeof(block_q8_0x4);
             if (scratch.size() < need)

@@ -71,7 +71,7 @@ thread t가 [g0(t), g1(t))를 pack
 
 두 공유는 구분해야 한다.
 
-### 3.1 Inter-thread sharing — 현재 1차 구현
+### 3.1 Inter-thread sharing — 구현 완료
 
 한 GEMM 호출 안에서 네 thread가 packed activation 하나를 공유한다.
 
@@ -81,7 +81,7 @@ Down 입력 dq ── pack 1회 ── Down의 네 GEMM worker
 
 Down microbenchmark의 1.68배는 주로 이 효과의 kernel-only 상한이다.
 
-### 3.2 Inter-projection sharing — 다음 단계
+### 3.2 Inter-projection sharing — 구현 완료
 
 입력이 같은 projection들이 pack 결과를 재사용한다.
 
@@ -92,8 +92,9 @@ FFN hidden dq          ── pack 1회 ── Down
 attention 출력         ── pack 1회 ── O
 ```
 
-현재 우선순위는 Down 하나에서 production 이득과 정확성을 먼저 확인하는 것이다. 처음부터
-Q/K/V와 Gate/Up까지 바꾸면 어느 family에서 오류나 회귀가 생겼는지 분리하기 어렵다.
+실제 개발은 Down 하나에서 production 이득과 정확성을 먼저 확인한 뒤 Q/K/V와 Gate/Up으로
+확장했다. 이 순서 덕분에 Down primitive의 효과와 projection-family reuse의 효과를 나눠
+검증할 수 있었다.
 
 ---
 
@@ -309,12 +310,22 @@ shared microbenchmark는 buffer를 timed loop 밖에서 만들었다. production
 T_new-down = T(block_pack_dq) + T(block_matmul_w2)
 ```
 
-기존과 새 경로를 같은 session에서 교차 측정한다.
+기존과 새 경로를 **같은 binary와 같은 session**에서 교차 측정한다.
 
 ```text
 warm-up
 baseline, shared, baseline, shared, ...
 ```
+
+각 SharedPack 실행은 앞뒤 baseline의 기하평균으로 보정한다.
+
+```text
+R_i = sqrt(T_BASE,before × T_BASE,after) / T_SP,i
+```
+
+`prefillMs`와 `[PREFILL ONLY] total`, `w2 + 관련 pack`을 각각 계산한다. 서로 다른 층위의
+시간을 한 비율에 섞지 않는다. 진행 중 A/B의 최종 판정은 모든 회차가 끝나고 invalid run,
+온도, 주파수 기록을 확인한 뒤 한다.
 
 | 판정 항목 | 기준 |
 |---|---:|
@@ -346,8 +357,8 @@ F32 activation → 기존과 동일한 Q80 quantization
                  └─ GEMM용 shared Q8×4 layout 직접 생성
 ```
 
-그 뒤 Q/K/V와 Gate/Up이 같은 packed panel을 재사용하도록 lifetime을 projection family까지
-확장한다.
+Q/K/V와 Gate/Up의 projection-family lifetime 공유는 이미 구현됐다. 남은 novelty 후보는
+producer가 shared packed layout을 직접 생성하는 단계다.
 
 강한 기여 문장은 다음 결합에서 나온다.
 
@@ -361,14 +372,16 @@ F32 activation → 기존과 동일한 Q80 quantization
 ## 11. 다음 작업 체크리스트
 
 ```text
-[ ] PACK_Q80X4 quant-type mismatch를 기능 검증 수준에서 해소
-[ ] N=1 B=16 pack bytes memcmp
-[ ] N=1 B=16 Down output bit comparison
-[ ] N=1 B=16/B=32 logits reference 통과
-[ ] pack-inclusive Down timing 수집
-[ ] Down ≥1.45×이면 N=8 wave 검증
+[x] PACK_Q80X4 quant-type mismatch를 기능 검증 수준에서 해소
+[x] N=1 B=16/B=32 logits reference 통과
+[x] pack-inclusive Down timing 수집
+[x] Gate/Up family 공유
+[x] Q/K/V family 공유
+[x] 동일 binary runtime A/B flag
+[x] prefill-only op profile
+[ ] paired anchor A/B 완료 및 artifact 고정
+[ ] N=8 wave bit-identical 검증
+[ ] 마지막 1~3행 tail 검증
 [ ] 성공 후 packed storage type 정식화
-[ ] Gate/Up family 공유
-[ ] Q/K/V family 공유
 [ ] F32 producer에서 shared Q8×4 직접 생성
 ```
