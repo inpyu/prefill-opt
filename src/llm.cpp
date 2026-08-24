@@ -354,6 +354,28 @@ LlmNet buildLlmNet(
             : nodeBuilder.addBuffer("q_d", size2D(h->syncType, nBatches, n.w1Slice.d0));
         const NnUint lBufferIndex = nodeBuilder.addBuffer("l", size2D(F_32, nBatches, n.w3Slice.d0));
 
+        // SharedPack-SDOT (research/19): Down 입력의 공유 block_q8_0x4 버퍼.
+        //
+        // 기존에는 matmul 안에서 **스레드마다** activation 전체를 중복 변환했다.
+        // K 가 긴 Down(14336)에서 네 개의 독립 cache footprint 가 생겨 4스레드 확장이
+        // 무너진다 — 실측 198.7 vs 공유 333.8 GOPS (1.68x, research/18 §6c).
+        //
+        // 크기: 총 (nBatches/4) 그룹 x kBlocks x sizeof(block_q8_0x4)
+        //   block_q8_0x4 = 4 x (32 int8 + fp16 scale) = 136 B
+        //
+        // ⚠️ PNTR_BATCH 는 버퍼의 행 수가 nBatches 와 같기를 요구한다
+        //    (nn-cpu.cpp:196 ASSERT_EQ(sourceSize->y, nBatches)).
+        //    그래서 nBatches 행으로 잡고 **행당 1/4 그룹** 분량을 둔다.
+        //    총량은 동일하고, pack op 는 base 포인터에서 전체를 선형 인덱싱한다.
+        //      행당 float 수 = kBlocks * 34 / 4  (34 float = 136 B = block_q8_0x4)
+        const bool sharedPackOn = (h->syncType == F_Q80) &&
+                                  (n.w2Slice.d % Q40_BLOCK_SIZE == 0u) &&
+                                  ((n.w2Slice.d / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
+        const NnUint dPackBufferIndex = sharedPackOn
+            ? nodeBuilder.addBuffer("d_pack", size2D(F_32, nBatches,
+                  (n.w2Slice.d / Q40_BLOCK_SIZE) * 34u / 4u))
+            : 0u;
+
         // moe
         const NnUint moeGtBufferIndex = nodeBuilder.addBuffer("gt", size2D(F_32, nBatches, nExpertsOr1));
         const NnUint moeExpertIndexesBufferIndex = nodeBuilder.addBuffer("act_exp_ix", size2D(F_32, nBatches, nActiveExpertsOr1));
@@ -700,12 +722,24 @@ LlmNet buildLlmNet(
                         size0(),
                         NnCastOpCodeConfig{});
                 }
+                // SharedPack-SDOT: Q80 활성화를 block_q8_0x4 로 **한 번만** 재배치한다.
+                // 네 스레드가 batch-row group 을 나눠 공유 버퍼에 병렬로 쓰고,
+                // executor 의 op 경계가 barrier 를 제공한다.
+                if (sharedPackOn) {
+                    ff.addOp(
+                        OP_PACK_Q80X4, "block_pack_dq", layerIndex,
+                        pointerBatchConfig(SRC_BUFFER, dqBufferIndex),
+                        pointerBatchConfig(SRC_BUFFER, dPackBufferIndex),
+                        size0(),
+                        NnPackQ80x4OpCodeConfig{});
+                }
                 ff.addOp(
                     OP_MATMUL, "block_matmul_w2", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, dqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, yBufferIndex),
                     size2D(h->weightType, n.w2Slice.n0, n.w2Slice.d),
-                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
+                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex,
+                        sharedPackOn ? dPackBufferIndex : NN_NO_PREPACK});
             }
             ff.addOp(
                 OP_CAST, "block_cast_d3", layerIndex,

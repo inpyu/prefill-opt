@@ -1997,6 +1997,9 @@ static void packQ80x4Forward(NnUint nThreads, NnUint threadIndex, NnUint batchSi
 #if NN_REPACK_AVAILABLE
     const NnUint kElems = context->inputSize.y;
     const NnUint kBlocks = kElems / Q40_BLOCK_SIZE;
+    // input/output 은 배치 행 포인터 배열이다. pack 은 그룹(4행) 단위로 선형 접근하므로
+    // 0번 행의 base 포인터에서 시작한다 — 버퍼가 연속이라는 전제이며,
+    // addBuffer 는 연속 할당을 보장한다.
     const NnBlockQ80 *in = (const NnBlockQ80 *)context->input[0];
     block_q8_0x4 *out = (block_q8_0x4 *)context->output[0];
 
@@ -2765,6 +2768,9 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType) {
         if (quantType == F32_F32_Q80) return repeatZForward_F32_Q80;
     }
     if (code == OP_PACK_Q80X4) {
+        // 입력은 Q80, 출력 버퍼는 F_32 로 선언돼 있다(바이트 컨테이너로만 쓴다).
+        // 실제 내용은 block_q8_0x4 이며 프레임워크는 이를 해석하지 않는다.
+        if (quantType == Q80_Q80_F32) return packQ80x4Forward;
         if (quantType == Q80_Q80_Q80) return packQ80x4Forward;
     }
     if (code == OP_SHIFT) {
