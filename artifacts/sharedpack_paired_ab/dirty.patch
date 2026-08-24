@@ -1,0 +1,354 @@
+diff --git a/research/19-sharedpack-implementation.md b/research/19-sharedpack-implementation.md
+index d4a564a..4ebfba4 100644
+--- a/research/19-sharedpack-implementation.md
++++ b/research/19-sharedpack-implementation.md
+@@ -292,6 +292,71 @@ op profile 은 op 시간의 직접 합이다. wave 를 켠 E2E 는 이 기기의
+ 
+ ---
+ 
++## 4d. 확정 — 동일 바이너리 paired anchor A/B
++
++`artifacts/sharedpack_ab/`. **동일 바이너리 `9300a29c` 에서 `DLLAMA_SHARED_PACK` 만
++전환** — 세션·빌드 교락이 없다. 커널·가중치·누적 순서는 그대로이고 그래프만 바뀐다.
++
++    warm-up 폐기
++    정순  BASE SP BASE SP BASE
++    역순  SP BASE SP BASE
++    = 보관 9회 (BASE 5, SP 4)
++    S=447, B=32, N=1, wave off, --stage-timing 1
++
++SD 카드 불량 섹터(§20 §1.3) 때문에 anchor 17회 대신 10회로 제한했다
++(6.3 GB × 10 = 63 GB 읽기).
++
++### 정확성: 9회 전부 동일
++
++    logits hash 종류 1개:  8b8178a50a97
++
++### 성능 (기하평균 paired ratio)
++
++| 지표 | 값 | 회차별 |
++|---|---|---|
++| **prefill (operator time)** | **1.293×** | 1.203 / 1.423 / 1.382 / 1.181 |
++| **Down (block_matmul_w2)** | **2.224×** | 1.982 / 2.446 / 2.437 / 2.070 |
++| pack 비용 | 212.6 ms | — |
++
++    BASE  n=5  중앙값 35.8s  CV 5.4%
++    SP    n=4  중앙값 27.1s  CV 6.3%
++
++### 부수 효과 — 안정성도 개선된다
++
++`BASE` 는 31.4~36.5s 로 흔들리는 반면 `SP` 는 25.6~30.0s 다. 스레드별 사본이 만드는
++cache 경합 자체가 회차마다 달라지는 변동원이었고, 공유하면 그 원인이 사라진다.
++
++### ⚠️ 이전 수치와의 관계
++
++| 측정 | 값 | 조건 |
++|---|---|---|
++| 최초 단일 측정 | 1.25× | 단일 관측 — **철회** |
++| 서로 다른 세션/빌드 비교 | 1.205× | baseline 이 이전 artifact — 교락 있음 |
++| **동일 바이너리 paired anchor** | **1.293×** | **확정값** |
++
++Down 도 1.60× → 1.64× → **2.224×** 로 올라갔는데, 앞선 값들이 서로 다른 세션·빌드
++비교였기 때문이다. paired 가 정확하다.
++
++### ⚠️ 이것은 **단일 노드 prefill operator time** 이다
++
++    확정:  N=1, wave off 에서 prefill operator time 1.293×
++    미확정: 분산 wave 실행(N=8)에서의 이득
++
++wave 를 켠 E2E 에서는 `B=32` 가 1.004× 였다(§4b). 연산이 빨라져도 파이프라인에서
++묻히는지, 아니면 E2E 편차(최대 51%)에 가려진 것인지 **아직 판별하지 못했다.**
++
++**따라서 시스템 기여(4.57~4.68×)와 곱하면 안 된다.**
++
++    4.57 × 1.29 = 5.9x    ← 이렇게 쓰지 않는다
++
++    층위 1  N=8 분산, wave on,  llama.cpp 대비    4.57~4.68×
++    층위 2  N=1 단일, wave off, 자기 baseline 대비 1.293×
++
++두 숫자를 **나란히 놓되 곱하지 않는다.** 곱셈을 주장하려면 `N=8, wave on` 에서
++같은 flag paired A/B 가 필요하다.
++
++---
++
+ ## 5. 계측 도구 (이미 구현됨)
+ 
+ | 도구 | 용도 |
+diff --git a/research/understand/13-sharedpack-sdot.md b/research/understand/13-sharedpack-sdot.md
+index f7c4f41..df4035d 100644
+--- a/research/understand/13-sharedpack-sdot.md
++++ b/research/understand/13-sharedpack-sdot.md
+@@ -164,17 +164,7 @@ op enum은 root와 worker 사이에 직렬화된다. 따라서 새 enum 값은 
+ 
+ ## 7. 2026-08-24 현재 구현 상태
+ 
+-### 완료
+-
+-| 항목 | 상태 |
+-|---|---|
+-| opcode/config 추가 | 완료 |
+-| parallel `packQ80x4Forward` | 완료 |
+-| matmul의 shared/fallback 분기 | 완료 |
+-| 기존 13개 matmul config에 `NN_NO_PREPACK` 지정 | 완료 |
+-| Down용 shared buffer와 pack op net builder 배선 | worktree에 구현됨 |
+-
+-### 현재 blocker
++### 초기 blocker와 해소
+ 
+ 첫 N=1 실행은 다음 오류로 중단됐다.
+ 
+@@ -199,20 +189,68 @@ runtime quant type   Q80_Q80_F32
+ 결과                 unsupported op
+ ```
+ 
+-따라서 **아직 valid logits나 production 성능 결과는 없다.** `333.8 GOPS`는 계속
+-microbenchmark의 pack-excluded upper bound다.
++기능 검증 단계에서는 `Q80_Q80_F32` 조합에도 `packQ80x4Forward`를 연결해 해결했다.
++`F_32`는 값의 의미가 아니라 byte 공간을 얻기 위한 임시 container다. production 완주와
++정확성 검증에는 성공했지만, 최종 코드에서는 명시적 packed storage type 또는 raw
++workspace로 의미를 정리해야 한다.
++
++### 완료된 구현
++
++| 항목 | 상태 |
++|---|---|
++| opcode/config와 parallel pack | 완료 |
++| matmul shared/fallback 분기 | 완료 |
++| Down inter-thread sharing | 완료 |
++| Q/K/V inter-thread + inter-projection sharing | 완료 |
++| Gate/Up inter-thread + inter-projection sharing | 완료 |
++| `DLLAMA_SHARED_PACK=0/1` 동일 바이너리 전환 | 완료 |
++| `[PREFILL ONLY]` op profile | 완료 |
++
++한 레이어에서 pack은 세 번 실행된다.
+ 
+-### blocker 해소의 두 층
++```text
++block_pack_yq   → Q, K, V
++block_pack_yq2  → Gate, Up
++block_pack_dq   → Down
++```
+ 
+-1. 기능 검증용 최소 변경: 현재 opaque F32 container를 유지하고 `Q80_Q80_F32` 조합에도
+-   `packQ80x4Forward`를 연결한다. 이 경우 주석과 assertion으로 “F32 값이 아니라 byte
+-   storage”임을 분명히 해야 한다.
+-2. 최종 구현: `block_q8_0x4`를 나타내는 명시적 packed storage type 또는 raw workspace를
+-   도입해 allocation, pointer resolution, 직렬화가 실제 의미를 표현하게 한다.
++attention과 FFN의 `yq`는 같은 buffer 이름을 재사용하지만 그 사이 `norm_1`이 값을
++갱신하므로 pack도 두 번 필요하다. packed workspace는 연산 순서상 번갈아 사용되며 현재
++단일-node 실행에서 overwrite 문제는 없었다.
+ 
+-첫 방법으로 정확성과 pack-inclusive 성능을 빠르게 판정한 뒤, 성공한 경우 두 번째 방법으로
+-정리하는 순서가 합리적이다. type enum도 wire protocol에 영향을 줄 수 있으므로 root/worker
+-동일 binary hash를 확인해야 한다.
++### 정확성과 초기 성능
++
++```text
++N=1, B=16/B=32
++Down-only와 전체 확장, 총 6회 logits hash = 8b8178a50a97
++```
++
++기존 별도 세션 op profile과 비교한 초기 결과:
++
++| op | baseline ms | SharedPack ms | 속도향상 |
++|---|---:|---:|---:|
++| Down | 10,111.6 | 6,163.6 | 1.64× |
++| Gate | 6,728.7 | 6,212.6 | 1.08× |
++| Up | 6,761.4 | 6,141.1 | 1.10× |
++| Q | 2,117.3 | 1,811.8 | 1.17× |
++| K | 572.8 | 459.0 | 1.25× |
++| V | 558.9 | 454.4 | 1.23× |
++| 누적 op total | 34,346.5 | 28,511.0 | 1.205× |
++
++pack 세 op의 합은 84.2 ms로 새 누적 op 시간의 0.30%였다. 사전등록한 Down, Gate/Up,
++전체 projection 기준과 N=1 bit gate를 통과했다.
++
++하지만 이 1.205배는 서로 다른 세션에서 얻은 누적 profile이고 decode가 포함돼 있었다.
++그래서 다음 두 도구를 추가했다.
++
++```text
++DLLAMA_SHARED_PACK=0/1      같은 binary에서 그래프만 전환
++[PREFILL ONLY] profile      decode 시작 전 op 누적값 snapshot
++```
++
++현재 같은 세션 paired anchor A/B를 진행 중이다. 부분 결과는 차이가 크지만 열과 DVFS도
++함께 변하고 있으므로, 완료 전 최종 E2E와 안정성 수치를 고정하지 않는다. 자세한 해석은
++[14-performance-validation.md](14-performance-validation.md)를 따른다.
+ 
+ ---
+ 
+@@ -334,4 +372,3 @@ F32 activation → 기존과 동일한 Q80 quantization
+ [ ] Q/K/V family 공유
+ [ ] F32 producer에서 shared Q8×4 직접 생성
+ ```
+-
+diff --git a/research/understand/README.md b/research/understand/README.md
+index e4ec1d0..6be9923 100644
+--- a/research/understand/README.md
++++ b/research/understand/README.md
+@@ -23,7 +23,7 @@
+     ├─ thread 2가 자기 scratch에 전체 pack → output column 일부 계산
+     └─ thread 3이 자기 scratch에 전체 pack → output column 일부 계산
+ 
+-개발 중
++구현 완료, 검증 중
+   Q80 activation
+           │
+           ▼
+@@ -79,28 +79,32 @@ kernel-only 차이             1.68×
+ 
+ ---
+ 
+-## 3. 개발 범위
++## 3. 개발·검증 범위
+ 
+-### 지금 구현하는 것
++### 구현을 완료한 것
+ 
+ 1. Down 앞에 별도 `OP_PACK_Q80X4` 추가
+ 2. 네 worker가 shared buffer의 서로 다른 batch-row group을 병렬로 pack
+ 3. executor op boundary를 synchronization으로 사용
+ 4. `block_matmul_w2`가 shared packed buffer를 읽도록 연결
+ 5. 기존 private-pack 경로와 GEMV tail fallback 유지
+-6. packed bytes, GEMM output, production logits의 bit-identical 검증
+-7. pack과 executor 경계까지 포함한 production 성능 측정
++6. Q/K/V와 Gate/Up이 projection family별 packed buffer를 공유
++7. 동일 바이너리에서 `DLLAMA_SHARED_PACK=0/1`로 baseline과 SharedPack 전환
++8. decode가 섞이지 않는 `[PREFILL ONLY]` op profile
++9. N=1, B=16/B=32 production logits bit-identical 검증
+ 
+-### Down 성공 후 확장할 것
++### 지금 검증하는 것
+ 
+ ```text
+-pack(yq) 1회 → Gate와 Up이 공유
+-pack(xq) 1회 → Q, K, V가 공유
+-pack(attention output) 1회 → O
++동일 바이너리 paired A/B
++  → prefill-only op 시간과 prefillMs 확정
++  → 열·DVFS·세션 드리프트를 anchor로 보정
++  → N=8 wave pipeline 정확성과 E2E 검증
+ ```
+ 
+-그다음에는 F32→Q80 producer가 downstream SDOT용 Q8×4 layout을 직접 생성하도록 확장한다.
+-이 단계가 단순한 전통적 BLAS shared packing을 넘어서는 알고리즘 기여 후보다.
++그다음 선택 과제는 F32→Q80 producer가 downstream SDOT용 Q8×4 layout을 직접 생성하는
++것이다. 다만 현재 pack 비용이 prefill op 시간의 약 0.3%라 성능 기여는 작다. 단순히
++novelty를 꾸미기 위해 넣지 않고, 데이터 흐름 단순화와 일반성의 가치가 있을 때 진행한다.
+ 
+ ### 현재 우선하지 않는 것
+ 
+@@ -123,13 +127,17 @@ DerivePP의 wave pipeline과 기존 scheduling 결과는 폐기하지 않는다.
+ | `OP_PACK_Q80X4` opcode와 config | 완료 |
+ | parallel `packQ80x4Forward` | 완료 |
+ | matmul shared/fallback 분기 | 완료 |
+-| Down용 buffer·pack op net builder 배선 | worktree에 구현 |
+-| valid N=1 logits | **미완료** |
+-| pack-inclusive production 성능 | **미측정** |
+-| Gate/Up, Q/K/V family 공유 | 미구현 |
++| Down용 buffer·pack op net builder 배선 | 완료 |
++| Gate/Up, Q/K/V family 공유 | 완료 |
++| valid N=1 logits | B=16/B=32, 6회 bit-identical |
++| pack-inclusive production op 성능 | 사전등록 기준 통과 |
++| 동일 바이너리 runtime A/B flag | 완료 |
++| prefill-only op profile | 완료 |
++| paired anchor A/B | **진행 중 — 최종 판정 전** |
++| N=8 wave 정확성·E2E | 미완료 |
+ | F32 producer→Q8×4 직접 생성 | 미구현 |
+ 
+-현재 첫 실행은 다음 type mismatch에서 중단된다.
++초기 구현에서는 다음 type mismatch가 있었다.
+ 
+ ```text
+ Unsupported CPU op code: PACK_Q80X4,
+@@ -137,19 +145,25 @@ quant: Q80_Q80_F32,
+ op name: block_pack_dq
+ ```
+ 
+-builder는 필요한 byte 공간을 얻기 위해 packed buffer를 `F_32` container로 선언했지만,
+-실제 내용은 opaque `block_q8_0x4` bytes다. 런타임은 이를 `Q80_Q80_F32` op로 분류하고,
+-forward table에는 `Q80_Q80_Q80` handler만 등록되어 있다.
++packed buffer를 `F_32` byte container로 선언했지만 실제 내용은 opaque `block_q8_0x4`라
++런타임 quant-type과 handler가 맞지 않았던 문제다. 이 blocker는 해소됐고 production
++그래프가 완주한다. 최종적으로 명시적 packed storage type 또는 raw workspace로 정리할
++기술 부채는 남아 있다.
+ 
+-따라서 다음 사실을 구분해야 한다.
++현재 확정 범위는 다음과 같다.
+ 
+ ```text
+-확정: shared kernel upper bound는 Down에서 1.68×
+-미확정: pack + executor boundary를 포함한 production 가속률
+-미확정: production bit-identical logits
++확정: Down pack-inclusive op 1.64×
++확정: 기존 누적 op profile 비교 34,346.5 → 28,511.0 ms = 1.205×
++확정: 테스트한 N=1 B=16/B=32 logits bit-identical
++진행: 동일 바이너리·prefill-only paired anchor로 1.205×의 재확정
++미확정: N=8 wave pipeline 정확성과 E2E
+ ```
+ 
+-상세 blocker와 해결 절차는 [13-sharedpack-sdot.md](13-sharedpack-sdot.md)를 따른다.
++기존 1.205배 표는 서로 다른 세션의 누적 op profile 비교였고 decode도 포함했다. 현재
++`DLLAMA_SHARED_PACK=0/1`과 `[PREFILL ONLY]` profiler를 추가해 이 두 한계를 제거한 A/B를
++수행 중이다. 측정 해석은 [14-performance-validation.md](14-performance-validation.md)를
++따른다.
+ 
+ ---
+ 
+@@ -171,9 +185,10 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
+ | 최종 연산 경로 | E2E 1.20× 이상 |
+ | 정확성 | packed bytes, GEMM output, 동일 구성 logits bit-identical |
+ 
+-단순 시간 추정으로 inter-thread와 projection-family 공유가 모두 기대대로 작동하면 E2E
+-약 1.16배를 예상한다. 이는 아직 실측 결과가 아니라 **개발 목표를 정하기 위한 추정**이다.
+-20%까지는 SharedPack 이후 전체 GEMM에서 추가 약 4%의 개선이 필요하다.
++초기 누적 op profile 비교에서는 1.205배로 연산 계층 목표를 통과했다. 다만 최종 논문 수치는
++진행 중인 동일 바이너리 paired A/B가 끝난 뒤 고정한다. 부분 결과에서 baseline과
++SharedPack의 차이는 선명하지만, 온도 상승과 2.0~2.4 GHz DVFS가 함께 관측됐으므로 완료 전
++수치와 안정성 주장을 확정하지 않는다.
+ 
+ ---
+ 
+@@ -185,12 +200,16 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
+        왜 WCEP/QCFuse/KP-SDOT이 탈락했고
+        K-sweep의 교락을 어떻게 분리했는가
+   → 13-sharedpack-sdot
+-       SharedPack을 executor와 net builder에 어떻게 넣는가
+-       현재 blocker와 정확성·성능 gate는 무엇인가
++       SharedPack을 executor와 net builder에 어떻게 넣었는가
++       정확성·성능 gate는 무엇인가
++  → 14-performance-validation
++       paired anchor, 열/DVFS, prefill-only op와 E2E를 어떻게 구분하는가
+   → 18-compute-path
+        원자료 수치와 시간순 실험 기록
+   → 19-sharedpack-implementation
+        source 변경과 인수인계 상태
++  → 20-measurement-environment
++       이 클러스터에서 새 실험을 실행하는 운영 규칙
+ ```
+ 
+ ### Pipeline/scheduling 배경까지 이해하려면
+@@ -204,6 +223,7 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
+   → 16-derivepp
+   → 12-cpu-compute-path
+   → 13-sharedpack-sdot
++  → 14-performance-validation
+ ```
+ 
+ ---
+@@ -226,6 +246,7 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
+ | [11-axis-cert.md](11-axis-cert.md) | scheduling 축 활성화 절차 — 현재 구현 우선순위는 아님 |
+ | [12-cpu-compute-path.md](12-cpu-compute-path.md) | **현재 연산 방향의 근거** — 기각 결과와 K-sweep 교락 분리 |
+ | [13-sharedpack-sdot.md](13-sharedpack-sdot.md) | **현재 구현 절차** — SharedPack 구조, 검증 gate, runtime blocker |
++| [14-performance-validation.md](14-performance-validation.md) | **현재 측정 해설** — anchor 보정, 열/DVFS, 계측 층위와 재현 artifact |
+ 
+ ---
+ 
+@@ -235,6 +256,7 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
+    [16-derivepp.md](../16-derivepp.md), CPU 연산 경로의 정본은
+    [18-compute-path.md](../18-compute-path.md)와
+    [19-sharedpack-implementation.md](../19-sharedpack-implementation.md), 그리고 run artifact다.
++   플랫폼 제약과 실행 규칙의 정본은 [20-measurement-environment.md](../20-measurement-environment.md)다.
+ 2. `18 §6b`의 초기 K-sweep 해석은 `18 §6c`와
+    [12-cpu-compute-path.md](12-cpu-compute-path.md)의 교락 분리 결과로 대체한다.
+ 3. 새로운 연산 최적화는 대상 op의 production 시간 비중, Amdahl 상한, 강한 baseline,

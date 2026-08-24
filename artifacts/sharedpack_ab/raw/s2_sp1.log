@@ -1,0 +1,168 @@
+📦 ControlPacket size: 2444 bytes
+📄 AddBos: 0
+📄 BosId: 128000 (<|begin_of_text|>)
+📄 EosId: 128001 (<|end_of_text|>) 128009 (<|eot_id|>) 
+📄 RegularVocabSize: 128000
+📄 SpecialVocabSize: 256
+💡 Arch: Llama
+💡 HiddenAct: Silu
+💡 Dim: 4096
+💡 HeadDim: 128
+💡 QDim: 4096
+💡 KvDim: 1024
+💡 HiddenDim: 14336
+💡 VocabSize: 128256
+💡 nLayers: 32
+💡 nHeads: 32
+💡 nKvHeads: 8
+💡 OrigSeqLen: 8192
+💡 SeqLen: 1024
+💡 NormEpsilon: 0.000010
+💡 RopeType: Llama
+💡 RopeTheta: 500000
+📀 RequiredMemory: 6350 MB
+🧠 CPU: neon dotprod fp16
+💿 Loading weights...
+💿 Weights loaded
+is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces
+🔷️ Eval 1565 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 1736 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 1619 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 1785 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 1667 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2109 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2019 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2341 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2274 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2002 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2239 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2549 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2153 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+🔷️ Eval 2064 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB | (32 tokens)
+  logitsDump: /home/ubuntu/prefill-opt/artifacts/sharedpack_ab/raw/lg_s2.bin (128256 floats)
+🔶 Pred  614 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  the
+🔶 Pred  598 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  risk
+🔶 Pred  601 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  of
+🔶 Pred  577 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  the
+🔶 Pred  720 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  risk
+🔶 Pred  612 ms Sync    0 ms | Sent     0 kB Recv     0 kB | KV tx/rx      0/     0 kB | Act tx/rx      0/     0 kB |  of
+
+Evaluation
+   nBatches: 32
+ prefillChunks: 14 (avg 32.00 tok/chunk)
+    nTokens: 447
+   tokens/s: 15.89 (62.93 ms/tok)
+Prediction
+    nTokens: 6
+   tokens/s: 1.61 (620.67 ms/tok)
+Timing
+  prefillMs: 28143.78
+
+=== op profile [PREFILL ONLY] total=28136.8 ms ===
+op                                     ms        %
+block_matmul_w3                    6076.1   21.59%
+block_matmul_w1                    6022.8   21.41%
+block_matmul_w2                    5927.3   21.07%
+block_multihead_att                2640.9    9.39%
+block_matmul_wo                    2134.1    7.58%
+block_matmul_q                     1810.2    6.43%
+final_matmul_logits                 455.6    1.62%
+block_matmul_v                      441.0    1.57%
+block_matmul_k                      436.1    1.55%
+block_mul                           422.6    1.50%
+block_act                           239.1    0.85%
+block_cast_d2                       219.6    0.78%
+block_merge_add2                    128.2    0.46%
+block_rope_q                        122.7    0.44%
+block_merge_add                     121.2    0.43%
+block_cast_d3                       115.5    0.41%
+block_cast_d                        115.3    0.41%
+block_norm_pre_1                     76.2    0.27%
+block_cast_y3                        71.6    0.25%
+block_shift_v                        62.5    0.22%
+block_rope_k                         58.3    0.21%
+block_cast_y                         57.4    0.20%
+block_shift_k                        55.5    0.20%
+block_norm_1                         55.4    0.20%
+block_cast_y2                        52.5    0.19%
+block_norm_0                         49.9    0.18%
+block_norm_pre_0                     49.0    0.17%
+block_pack_yq2                       39.8    0.14%
+block_pack_dq                        37.3    0.13%
+block_pack_yq                        26.0    0.09%
+final_merge_add                       5.2    0.02%
+embedding                             5.0    0.02%
+block_cast_x                          3.3    0.01%
+final_norm                            2.5    0.01%
+final_cast_y                          0.9    0.00%
+final_norm_pre                        0.3    0.00%
+
+=== op profile (DLLAMA_OP_PROFILE) total=31865.7 ms ===
+op                                     ms        %
+block_matmul_w3                    6834.4   21.45%
+block_matmul_w1                    6786.4   21.30%
+block_matmul_w2                    6695.0   21.01%
+block_multihead_att                3132.1    9.83%
+block_matmul_wo                    2370.5    7.44%
+block_matmul_q                     2037.4    6.39%
+final_matmul_logits                 640.3    2.01%
+block_matmul_v                      501.5    1.57%
+block_matmul_k                      501.1    1.57%
+block_mul                           432.5    1.36%
+block_act                           246.2    0.77%
+block_cast_d2                       225.2    0.71%
+block_merge_add2                    143.7    0.45%
+block_merge_add                     132.7    0.42%
+block_rope_q                        128.1    0.40%
+block_cast_d                        118.1    0.37%
+block_cast_d3                       117.6    0.37%
+block_norm_pre_1                     78.0    0.24%
+block_cast_y3                        72.6    0.23%
+block_shift_v                        70.0    0.22%
+block_norm_1                         68.6    0.22%
+block_norm_0                         65.8    0.21%
+block_rope_k                         63.7    0.20%
+block_cast_y                         62.6    0.20%
+block_shift_k                        61.8    0.19%
+block_cast_y2                        61.1    0.19%
+block_pack_yq2                       60.7    0.19%
+block_norm_pre_0                     51.7    0.16%
+block_pack_dq                        50.1    0.16%
+block_pack_yq                        32.6    0.10%
+final_merge_add                       8.0    0.03%
+embedding                             5.7    0.02%
+final_norm                            5.5    0.02%
+block_cast_x                          3.4    0.01%
+final_cast_y                          0.9    0.00%
+final_norm_pre                        0.3    0.00%
+ syncWaitMs: 0.00
+ syncXferMs: 0.00
+     attnMs: 2640.86
+     gemmMs: 23602.16
+   attnProjMs: 5120.33
+        ffnMs: 18026.24
+       normMs: 233.29
+     lmHeadMs: 455.59
+      otherMs: 1660.47
+     ttftMs: 28758.68
+   decodeMs: 3730.65
+    totalMs: 31874.42
+WallMetrics
+ wall_tpot_ms: 621.77
+wall_decode_tps: 1.61
+TTFTBreakdown
+     prefillEndMs: 28143.78
+firstDecodeStartMs: 28143.81
+ firstDecodeDoneMs: 28758.57
+   firstTokenEmitMs: 28758.68
+TrafficBreakdown
+      kvTxMB: 0.00
+      kvRxMB: 0.00
+activationTxMB: 0.00
+activationRxMB: 0.00
+kvMigrationViolations: 0
+Scheduling
+ bubbleRatioEstDecode: 0.000
+queueWaitPrefillMs: 0.00
+ queueWaitDecodeMs: 0.00
+ prefillSlotCount: 0

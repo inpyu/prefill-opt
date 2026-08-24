@@ -164,17 +164,7 @@ op enum은 root와 worker 사이에 직렬화된다. 따라서 새 enum 값은 �
 
 ## 7. 2026-08-24 현재 구현 상태
 
-### 완료
-
-| 항목 | 상태 |
-|---|---|
-| opcode/config 추가 | 완료 |
-| parallel `packQ80x4Forward` | 완료 |
-| matmul의 shared/fallback 분기 | 완료 |
-| 기존 13개 matmul config에 `NN_NO_PREPACK` 지정 | 완료 |
-| Down용 shared buffer와 pack op net builder 배선 | worktree에 구현됨 |
-
-### 현재 blocker
+### 초기 blocker와 해소
 
 첫 N=1 실행은 다음 오류로 중단됐다.
 
@@ -199,20 +189,68 @@ runtime quant type   Q80_Q80_F32
 결과                 unsupported op
 ```
 
-따라서 **아직 valid logits나 production 성능 결과는 없다.** `333.8 GOPS`는 계속
-microbenchmark의 pack-excluded upper bound다.
+기능 검증 단계에서는 `Q80_Q80_F32` 조합에도 `packQ80x4Forward`를 연결해 해결했다.
+`F_32`는 값의 의미가 아니라 byte 공간을 얻기 위한 임시 container다. production 완주와
+정확성 검증에는 성공했지만, 최종 코드에서는 명시적 packed storage type 또는 raw
+workspace로 의미를 정리해야 한다.
 
-### blocker 해소의 두 층
+### 완료된 구현
 
-1. 기능 검증용 최소 변경: 현재 opaque F32 container를 유지하고 `Q80_Q80_F32` 조합에도
-   `packQ80x4Forward`를 연결한다. 이 경우 주석과 assertion으로 “F32 값이 아니라 byte
-   storage”임을 분명히 해야 한다.
-2. 최종 구현: `block_q8_0x4`를 나타내는 명시적 packed storage type 또는 raw workspace를
-   도입해 allocation, pointer resolution, 직렬화가 실제 의미를 표현하게 한다.
+| 항목 | 상태 |
+|---|---|
+| opcode/config와 parallel pack | 완료 |
+| matmul shared/fallback 분기 | 완료 |
+| Down inter-thread sharing | 완료 |
+| Q/K/V inter-thread + inter-projection sharing | 완료 |
+| Gate/Up inter-thread + inter-projection sharing | 완료 |
+| `DLLAMA_SHARED_PACK=0/1` 동일 바이너리 전환 | 완료 |
+| `[PREFILL ONLY]` op profile | 완료 |
 
-첫 방법으로 정확성과 pack-inclusive 성능을 빠르게 판정한 뒤, 성공한 경우 두 번째 방법으로
-정리하는 순서가 합리적이다. type enum도 wire protocol에 영향을 줄 수 있으므로 root/worker
-동일 binary hash를 확인해야 한다.
+한 레이어에서 pack은 세 번 실행된다.
+
+```text
+block_pack_yq   → Q, K, V
+block_pack_yq2  → Gate, Up
+block_pack_dq   → Down
+```
+
+attention과 FFN의 `yq`는 같은 buffer 이름을 재사용하지만 그 사이 `norm_1`이 값을
+갱신하므로 pack도 두 번 필요하다. packed workspace는 연산 순서상 번갈아 사용되며 현재
+단일-node 실행에서 overwrite 문제는 없었다.
+
+### 정확성과 초기 성능
+
+```text
+N=1, B=16/B=32
+Down-only와 전체 확장, 총 6회 logits hash = 8b8178a50a97
+```
+
+기존 별도 세션 op profile과 비교한 초기 결과:
+
+| op | baseline ms | SharedPack ms | 속도향상 |
+|---|---:|---:|---:|
+| Down | 10,111.6 | 6,163.6 | 1.64× |
+| Gate | 6,728.7 | 6,212.6 | 1.08× |
+| Up | 6,761.4 | 6,141.1 | 1.10× |
+| Q | 2,117.3 | 1,811.8 | 1.17× |
+| K | 572.8 | 459.0 | 1.25× |
+| V | 558.9 | 454.4 | 1.23× |
+| 누적 op total | 34,346.5 | 28,511.0 | 1.205× |
+
+pack 세 op의 합은 84.2 ms로 새 누적 op 시간의 0.30%였다. 사전등록한 Down, Gate/Up,
+전체 projection 기준과 N=1 bit gate를 통과했다.
+
+하지만 이 1.205배는 서로 다른 세션에서 얻은 누적 profile이고 decode가 포함돼 있었다.
+그래서 다음 두 도구를 추가했다.
+
+```text
+DLLAMA_SHARED_PACK=0/1      같은 binary에서 그래프만 전환
+[PREFILL ONLY] profile      decode 시작 전 op 누적값 snapshot
+```
+
+현재 같은 세션 paired anchor A/B를 진행 중이다. 부분 결과는 차이가 크지만 열과 DVFS도
+함께 변하고 있으므로, 완료 전 최종 E2E와 안정성 수치를 고정하지 않는다. 자세한 해석은
+[14-performance-validation.md](14-performance-validation.md)를 따른다.
 
 ---
 
@@ -334,4 +372,3 @@ F32 activation → 기존과 동일한 Q80 quantization
 [ ] Q/K/V family 공유
 [ ] F32 producer에서 shared Q8×4 직접 생성
 ```
-

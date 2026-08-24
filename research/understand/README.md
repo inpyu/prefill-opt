@@ -23,7 +23,7 @@
     ├─ thread 2가 자기 scratch에 전체 pack → output column 일부 계산
     └─ thread 3이 자기 scratch에 전체 pack → output column 일부 계산
 
-개발 중
+구현 완료, 검증 중
   Q80 activation
           │
           ▼
@@ -79,28 +79,32 @@ kernel-only 차이             1.68×
 
 ---
 
-## 3. 개발 범위
+## 3. 개발·검증 범위
 
-### 지금 구현하는 것
+### 구현을 완료한 것
 
 1. Down 앞에 별도 `OP_PACK_Q80X4` 추가
 2. 네 worker가 shared buffer의 서로 다른 batch-row group을 병렬로 pack
 3. executor op boundary를 synchronization으로 사용
 4. `block_matmul_w2`가 shared packed buffer를 읽도록 연결
 5. 기존 private-pack 경로와 GEMV tail fallback 유지
-6. packed bytes, GEMM output, production logits의 bit-identical 검증
-7. pack과 executor 경계까지 포함한 production 성능 측정
+6. Q/K/V와 Gate/Up이 projection family별 packed buffer를 공유
+7. 동일 바이너리에서 `DLLAMA_SHARED_PACK=0/1`로 baseline과 SharedPack 전환
+8. decode가 섞이지 않는 `[PREFILL ONLY]` op profile
+9. N=1, B=16/B=32 production logits bit-identical 검증
 
-### Down 성공 후 확장할 것
+### 지금 검증하는 것
 
 ```text
-pack(yq) 1회 → Gate와 Up이 공유
-pack(xq) 1회 → Q, K, V가 공유
-pack(attention output) 1회 → O
+동일 바이너리 paired A/B
+  → prefill-only op 시간과 prefillMs 확정
+  → 열·DVFS·세션 드리프트를 anchor로 보정
+  → N=8 wave pipeline 정확성과 E2E 검증
 ```
 
-그다음에는 F32→Q80 producer가 downstream SDOT용 Q8×4 layout을 직접 생성하도록 확장한다.
-이 단계가 단순한 전통적 BLAS shared packing을 넘어서는 알고리즘 기여 후보다.
+그다음 선택 과제는 F32→Q80 producer가 downstream SDOT용 Q8×4 layout을 직접 생성하는
+것이다. 다만 현재 pack 비용이 prefill op 시간의 약 0.3%라 성능 기여는 작다. 단순히
+novelty를 꾸미기 위해 넣지 않고, 데이터 흐름 단순화와 일반성의 가치가 있을 때 진행한다.
 
 ### 현재 우선하지 않는 것
 
@@ -123,13 +127,17 @@ DerivePP의 wave pipeline과 기존 scheduling 결과는 폐기하지 않는다.
 | `OP_PACK_Q80X4` opcode와 config | 완료 |
 | parallel `packQ80x4Forward` | 완료 |
 | matmul shared/fallback 분기 | 완료 |
-| Down용 buffer·pack op net builder 배선 | worktree에 구현 |
-| valid N=1 logits | **미완료** |
-| pack-inclusive production 성능 | **미측정** |
-| Gate/Up, Q/K/V family 공유 | 미구현 |
+| Down용 buffer·pack op net builder 배선 | 완료 |
+| Gate/Up, Q/K/V family 공유 | 완료 |
+| valid N=1 logits | B=16/B=32, 6회 bit-identical |
+| pack-inclusive production op 성능 | 사전등록 기준 통과 |
+| 동일 바이너리 runtime A/B flag | 완료 |
+| prefill-only op profile | 완료 |
+| paired anchor A/B | **진행 중 — 최종 판정 전** |
+| N=8 wave 정확성·E2E | 미완료 |
 | F32 producer→Q8×4 직접 생성 | 미구현 |
 
-현재 첫 실행은 다음 type mismatch에서 중단된다.
+초기 구현에서는 다음 type mismatch가 있었다.
 
 ```text
 Unsupported CPU op code: PACK_Q80X4,
@@ -137,19 +145,25 @@ quant: Q80_Q80_F32,
 op name: block_pack_dq
 ```
 
-builder는 필요한 byte 공간을 얻기 위해 packed buffer를 `F_32` container로 선언했지만,
-실제 내용은 opaque `block_q8_0x4` bytes다. 런타임은 이를 `Q80_Q80_F32` op로 분류하고,
-forward table에는 `Q80_Q80_Q80` handler만 등록되어 있다.
+packed buffer를 `F_32` byte container로 선언했지만 실제 내용은 opaque `block_q8_0x4`라
+런타임 quant-type과 handler가 맞지 않았던 문제다. 이 blocker는 해소됐고 production
+그래프가 완주한다. 최종적으로 명시적 packed storage type 또는 raw workspace로 정리할
+기술 부채는 남아 있다.
 
-따라서 다음 사실을 구분해야 한다.
+현재 확정 범위는 다음과 같다.
 
 ```text
-확정: shared kernel upper bound는 Down에서 1.68×
-미확정: pack + executor boundary를 포함한 production 가속률
-미확정: production bit-identical logits
+확정: Down pack-inclusive op 1.64×
+확정: 기존 누적 op profile 비교 34,346.5 → 28,511.0 ms = 1.205×
+확정: 테스트한 N=1 B=16/B=32 logits bit-identical
+진행: 동일 바이너리·prefill-only paired anchor로 1.205×의 재확정
+미확정: N=8 wave pipeline 정확성과 E2E
 ```
 
-상세 blocker와 해결 절차는 [13-sharedpack-sdot.md](13-sharedpack-sdot.md)를 따른다.
+기존 1.205배 표는 서로 다른 세션의 누적 op profile 비교였고 decode도 포함했다. 현재
+`DLLAMA_SHARED_PACK=0/1`과 `[PREFILL ONLY]` profiler를 추가해 이 두 한계를 제거한 A/B를
+수행 중이다. 측정 해석은 [14-performance-validation.md](14-performance-validation.md)를
+따른다.
 
 ---
 
@@ -171,9 +185,10 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
 | 최종 연산 경로 | E2E 1.20× 이상 |
 | 정확성 | packed bytes, GEMM output, 동일 구성 logits bit-identical |
 
-단순 시간 추정으로 inter-thread와 projection-family 공유가 모두 기대대로 작동하면 E2E
-약 1.16배를 예상한다. 이는 아직 실측 결과가 아니라 **개발 목표를 정하기 위한 추정**이다.
-20%까지는 SharedPack 이후 전체 GEMM에서 추가 약 4%의 개선이 필요하다.
+초기 누적 op profile 비교에서는 1.205배로 연산 계층 목표를 통과했다. 다만 최종 논문 수치는
+진행 중인 동일 바이너리 paired A/B가 끝난 뒤 고정한다. 부분 결과에서 baseline과
+SharedPack의 차이는 선명하지만, 온도 상승과 2.0~2.4 GHz DVFS가 함께 관측됐으므로 완료 전
+수치와 안정성 주장을 확정하지 않는다.
 
 ---
 
@@ -185,12 +200,16 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
        왜 WCEP/QCFuse/KP-SDOT이 탈락했고
        K-sweep의 교락을 어떻게 분리했는가
   → 13-sharedpack-sdot
-       SharedPack을 executor와 net builder에 어떻게 넣는가
-       현재 blocker와 정확성·성능 gate는 무엇인가
+       SharedPack을 executor와 net builder에 어떻게 넣었는가
+       정확성·성능 gate는 무엇인가
+  → 14-performance-validation
+       paired anchor, 열/DVFS, prefill-only op와 E2E를 어떻게 구분하는가
   → 18-compute-path
        원자료 수치와 시간순 실험 기록
   → 19-sharedpack-implementation
        source 변경과 인수인계 상태
+  → 20-measurement-environment
+       이 클러스터에서 새 실험을 실행하는 운영 규칙
 ```
 
 ### Pipeline/scheduling 배경까지 이해하려면
@@ -204,6 +223,7 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
   → 16-derivepp
   → 12-cpu-compute-path
   → 13-sharedpack-sdot
+  → 14-performance-validation
 ```
 
 ---
@@ -226,6 +246,7 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
 | [11-axis-cert.md](11-axis-cert.md) | scheduling 축 활성화 절차 — 현재 구현 우선순위는 아님 |
 | [12-cpu-compute-path.md](12-cpu-compute-path.md) | **현재 연산 방향의 근거** — 기각 결과와 K-sweep 교락 분리 |
 | [13-sharedpack-sdot.md](13-sharedpack-sdot.md) | **현재 구현 절차** — SharedPack 구조, 검증 gate, runtime blocker |
+| [14-performance-validation.md](14-performance-validation.md) | **현재 측정 해설** — anchor 보정, 열/DVFS, 계측 층위와 재현 artifact |
 
 ---
 
@@ -235,6 +256,7 @@ T_new-down = T(block_pack_dq) + T(block_matmul_w2)
    [16-derivepp.md](../16-derivepp.md), CPU 연산 경로의 정본은
    [18-compute-path.md](../18-compute-path.md)와
    [19-sharedpack-implementation.md](../19-sharedpack-implementation.md), 그리고 run artifact다.
+   플랫폼 제약과 실행 규칙의 정본은 [20-measurement-environment.md](../20-measurement-environment.md)다.
 2. `18 §6b`의 초기 K-sweep 해석은 `18 §6c`와
    [12-cpu-compute-path.md](12-cpu-compute-path.md)의 교락 분리 결과로 대체한다.
 3. 새로운 연산 최적화는 대상 op의 production 시간 비중, Amdahl 상한, 강한 baseline,
