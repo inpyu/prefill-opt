@@ -368,6 +368,16 @@ LlmNet buildLlmNet(
         //    그래서 nBatches 행으로 잡고 **행당 1/4 그룹** 분량을 둔다.
         //    총량은 동일하고, pack op 는 base 포인터에서 전체를 선형 인덱싱한다.
         //      행당 float 수 = kBlocks * 34 / 4  (34 float = 136 B = block_q8_0x4)
+        // yq 는 Q/K/V 와 Gate/Up 이 **모두** 입력으로 쓴다 (K = dim).
+        // pack 하나로 다섯 projection 을 커버한다 — inter-projection sharing.
+        const bool yPackOn = (h->syncType == F_Q80) &&
+                             (h->dim % Q40_BLOCK_SIZE == 0u) &&
+                             ((h->dim / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
+        const NnUint yPackBufferIndex = yPackOn
+            ? nodeBuilder.addBuffer("y_pack", size2D(F_32, nBatches,
+                  (h->dim / Q40_BLOCK_SIZE) * 34u / 4u))
+            : 0u;
+
         const bool sharedPackOn = (h->syncType == F_Q80) &&
                                   (n.w2Slice.d % Q40_BLOCK_SIZE == 0u) &&
                                   ((n.w2Slice.d / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
@@ -467,24 +477,33 @@ LlmNet buildLlmNet(
                     size0(),
                     NnCastOpCodeConfig{});
             }
+            // SharedPack: yq 를 한 번만 재배치해 Q·K·V 가 공유한다.
+            if (yPackOn) {
+                att.addOp(
+                    OP_PACK_Q80X4, "block_pack_yq", layerIndex,
+                    pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
+                    pointerBatchConfig(SRC_BUFFER, yPackBufferIndex),
+                    size0(),
+                    NnPackQ80x4OpCodeConfig{});
+            }
             att.addOp(
                 OP_MATMUL, "block_matmul_q", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, qBufferIndex),
                 size2D(h->weightType, n.qSlice.n, n.qSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
             att.addOp(
                 OP_MATMUL, "block_matmul_k", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, kTempBufferIndex),
                 size2D(h->weightType, n.kSlice.n, n.kSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
             att.addOp(
                 OP_MATMUL, "block_matmul_v", layerIndex,
                 pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                 pointerBatchConfig(SRC_BUFFER, vTempBufferIndex),
                 size2D(h->weightType, n.vSlice.n, n.vSlice.d0),
-                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
+                NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
 
             if (h->archType == QWEN3 || h->archType == QWEN3_MOE) {
                 att.addOp(OP_INV_RMS, "block_norm_pre_q", layerIndex,
@@ -690,18 +709,31 @@ LlmNet buildLlmNet(
                         size0(),
                         NnCastOpCodeConfig{});
                 }
+                // SharedPack: FFN 입력 yq 를 한 번만 재배치해 Gate·Up 이 공유한다.
+                // (attention 의 pack_yq 와 같은 버퍼를 쓰지 않는다 — 그 사이에
+                //  norm_1 이 yq 를 덮어쓰므로 레이어 안에서 값이 다르다.)
+                if (yPackOn) {
+                    ff.addOp(
+                        OP_PACK_Q80X4, "block_pack_yq2", layerIndex,
+                        pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
+                        pointerBatchConfig(SRC_BUFFER, yPackBufferIndex),
+                        size0(),
+                        NnPackQ80x4OpCodeConfig{});
+                }
                 ff.addOp(
                     OP_MATMUL, "block_matmul_w1", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, dBufferIndex),
                     size2D(h->weightType, n.w1Slice.n, n.w1Slice.d0),
-                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
+                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex,
+                        yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
                 ff.addOp(
                     OP_MATMUL, "block_matmul_w3", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, yqBufferIndex),
                     pointerBatchConfig(SRC_BUFFER, lBufferIndex),
                     size2D(h->weightType, n.w3Slice.n, n.w3Slice.d0),
-                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex, NN_NO_PREPACK});
+                    NnMatmulOpConfig{0, 0, moeExpertIndexesBufferIndex,
+                        yPackOn ? yPackBufferIndex : NN_NO_PREPACK});
                 ff.addOp(
                     OP_SILU, "block_act", layerIndex,
                     pointerBatchConfig(SRC_BUFFER, dBufferIndex),
