@@ -8,6 +8,7 @@
 #include "tokenizer.hpp"
 #include "app.hpp"
 void reportOpProfile();
+void markPrefillEndOpProfile();
 #include <climits>
 #include <stdexcept>
 #include <cmath>
@@ -648,6 +649,7 @@ static void inference(AppInferenceContext *context) {
 
 
     prefillWallUs = wallClock.elapsedMicroseconds();
+    markPrefillEndOpProfile();   // decode 가 섞이기 전 스냅샷 (research/19 §4c)
     NnUint prefillEndWallUs = prefillWallUs;
 
     // SP group role transition: Prefill complete → Decode

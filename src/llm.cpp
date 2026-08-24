@@ -370,7 +370,14 @@ LlmNet buildLlmNet(
         //      행당 float 수 = kBlocks * 34 / 4  (34 float = 136 B = block_q8_0x4)
         // yq 는 Q/K/V 와 Gate/Up 이 **모두** 입력으로 쓴다 (K = dim).
         // pack 하나로 다섯 projection 을 커버한다 — inter-projection sharing.
-        const bool yPackOn = (h->syncType == F_Q80) &&
+        // 동일 바이너리로 paired A/B 를 하기 위한 runtime flag (research/19 §다음단계).
+        //   DLLAMA_SHARED_PACK=0  기존 private pack (baseline)
+        //   DLLAMA_SHARED_PACK=1  SharedPack (기본)
+        // 그래프만 바뀌고 커널·가중치·순서는 그대로다.
+        const char *spEnv = std::getenv("DLLAMA_SHARED_PACK");
+        const bool sharedPackEnabled = (spEnv == nullptr) || (spEnv[0] != '0');
+
+        const bool yPackOn = sharedPackEnabled && (h->syncType == F_Q80) &&
                              (h->dim % Q40_BLOCK_SIZE == 0u) &&
                              ((h->dim / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
         const NnUint yPackBufferIndex = yPackOn
@@ -378,7 +385,7 @@ LlmNet buildLlmNet(
                   (h->dim / Q40_BLOCK_SIZE) * 34u / 4u))
             : 0u;
 
-        const bool sharedPackOn = (h->syncType == F_Q80) &&
+        const bool sharedPackOn = sharedPackEnabled && (h->syncType == F_Q80) &&
                                   (n.w2Slice.d % Q40_BLOCK_SIZE == 0u) &&
                                   ((n.w2Slice.d / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
         const NnUint dPackBufferIndex = sharedPackOn

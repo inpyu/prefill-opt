@@ -1066,9 +1066,32 @@ static void accumulateOpProfile(NnExecutor *ex) {
     }
 }
 
+// prefill 종료 시점의 스냅샷. decode 가 섞이지 않은 값이 필요하다.
+static std::map<std::string, unsigned long long> g_opUsPrefill;
+static unsigned long long g_opTotalUsPrefill = 0;
+
+void markPrefillEndOpProfile() {
+    if (!opProfileOn())
+        return;
+    g_opUsPrefill = g_opUs;
+    g_opTotalUsPrefill = g_opTotalUs;
+}
+
 void reportOpProfile() {
     if (!opProfileOn() || g_opUs.empty())
         return;
+    // prefill-only 를 우선 쓴다. mark 가 안 됐으면 전체(과거 동작).
+    const bool hasPrefill = g_opTotalUsPrefill > 0;
+    if (hasPrefill) {
+        std::vector<std::pair<unsigned long long, std::string>> pv;
+        for (const auto &kv : g_opUsPrefill) pv.push_back({kv.second, kv.first});
+        std::sort(pv.rbegin(), pv.rend());
+        printf("\n=== op profile [PREFILL ONLY] total=%.1f ms ===\n", g_opTotalUsPrefill / 1000.0);
+        printf("%-28s %12s %8s\n", "op", "ms", "%");
+        for (const auto &q : pv)
+            printf("%-28s %12.1f %7.2f%%\n", q.second.c_str(), q.first / 1000.0,
+                   100.0 * q.first / g_opTotalUsPrefill);
+    }
     std::vector<std::pair<unsigned long long, std::string>> v;
     for (const auto &kv : g_opUs) v.push_back({kv.second, kv.first});
     std::sort(v.rbegin(), v.rend());
