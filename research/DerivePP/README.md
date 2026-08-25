@@ -72,7 +72,7 @@ RoleSplit-KV 로 KV locality 와 GQA 재사용을 회수한다
 
 ---
 
-## 기여 세 가지
+## 기여 네 가지 — 확정 둘, 진행 둘
 
 | # | 기여 | 계층 |
 |---|---|---|
@@ -81,9 +81,16 @@ RoleSplit-KV 로 KV locality 와 GQA 재사용을 회수한다
 | 3 | **K/V Role-Split GQA Attention** *(개발 착수)* — K 는 `QK^T` 내적에 맞춰 token-major 로 두고, V 는 `AV` 누적에 맞춰 feature-block 으로 저장하며 append 시점에 직접 기록한다. `kvMul` 개 GQA query head 가 레지스터에 올린 V 하나를 공유 | attention |
 | 4 | **End-to-end hierarchical co-design** *(검증 중)* — Wave Pipeline 위에서 SharedPack 이 N=8 TTFT 를 추가로 **1.436×** 단축했다. 두 계층의 interaction 과 critical-path 변화는 2×2 ablation 및 recurrence 분석으로 **검증 중이다** | 결합 |
 
-> **기여 3 은 아직 가설이다.** 지금 확정 가능한 것은 기여 1 과 2 이고,
-> "두 계층이 서로를 강화한다" 는 2×2 앵커와 recurrence 분해가 끝난 뒤에만
-> 확정 기여로 올린다. → [08-status.md](10-status.md) §8.4
+> **확정된 것은 기여 1 과 2 뿐이다.**
+>
+> | 기여 | 상태 | 확정 조건 |
+> |---|---|---|
+> | 1 Wave Pipeline | **확정** | — |
+> | 2 SharedPack | **확정** | — |
+> | 3 RoleSplit Attention | **개발 착수** | 내부 분해 → AV microkernel ≥1.5× → attention 전체 ≥1.5× |
+> | 4 Co-design | **검증 중** | 2×2×2 앵커 + recurrence 분해 |
+>
+> → [10-status.md](10-status.md) §10.4
 
 ---
 
@@ -131,8 +138,19 @@ RoleSplit-KV 로 KV locality 와 GQA 재사용을 회수한다
 **시스템 공동설계로 주장한다.**
 
 > 기존 공개 CPU 분산 구현은 저속 Ethernet 에서 단일 노드의 0.41~0.44× 에 머물렀다.
-> 본 연구는 **inter-node wave execution** 과 **intra-node exact shared packing** 을
-> 공동 설계하여 실제 CPU 클러스터 prefill 을 확장 가능하게 만들었다.
+> 본 연구는 **inter-node wave execution**, **intra-node exact shared packing**,
+> **role-specific KV representation** 을 계층적으로 공동 설계하여 실제 CPU 클러스터
+> prefill 을 짧은 문맥부터 긴 문맥까지 확장 가능하게 만들었다.
+
+각 계층이 없앤 중복은 서로 다르다.
+
+| 계층 | 중복의 정체 | 공유 단위 |
+|---|---|---|
+| 클러스터 | 통신 대기 동안 노는 CPU | 노드 사이 microbatch |
+| projection | 스레드마다 다시 만드는 packed activation | 스레드 사이 packed buffer |
+| attention | query head 마다 다시 읽는 V | register 안의 V vector |
+
+> **세 번째 계층은 아직 확정되지 않았다.** 내부 분해조차 끝나지 않았다.
 
 시스템 논문의 novelty 는 각 구성요소가 완전히 새로운가로만 결정되지 않는다.
 네 가지가 중요하다.

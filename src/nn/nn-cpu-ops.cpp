@@ -17,6 +17,7 @@
 #include "nn-repack.hpp"
 #include <atomic>
 #include <chrono>
+#include <unistd.h>
 #include <thread>
 #include "nn-quants.hpp"
 #include "llamafile/sgemm.hpp"
@@ -1114,21 +1115,42 @@ static inline float horizontalSum_F32(float32x4_t v) {
 }
 #endif
 
-// ── attention phase 계측 (research/DerivePP 03b, Phase 1) ──
+// ── attention phase 계측 (research/DerivePP 05-attention-layer, Phase 1) ──
 //
-// S=7212 에서 attention core 가 prefill 의 약 53% 다(research/17 §7.6). 그런데
-// **그 안에서 무엇이 큰지는 확정되지 않았다.** 커널 주석에 남은 두 부정 결과가
-// 이미 힌트를 준다:
-//   · QK 4x4 블로킹  마이크로벤치 1.81x -> in-situ 38,031 vs 39,050 (오히려 손해)
-//     "softmax·스크래치 왕복·온라인 누적 갱신 같은 주변 비용이 커서 묻힌다"
-//   · AV 블로킹      V 타일 512 kB 가 L2 를 넘겨 1.71배 악화
-// 즉 QK/AV 가 아니라 softmax 경로가 지배적일 가능성이 있다. 재보지 않고
-// V 레이아웃부터 바꾸면 개선하고도 전체가 안 움직일 수 있다.
+// S_real=7212 에서 attention core 가 prefill 의 약 53% 다(research/17 §7.6).
+// 그런데 **그 안에서 무엇이 큰지는 확정되지 않았다.** 커널 주석의 부정 결과가
+// 이미 힌트를 준다 — QK 4x4 블로킹이 마이크로벤치 1.81x 인데 in-situ 에서
+// 오히려 손해였고, 원인 설명이 "softmax·스크래치 왕복·온라인 누적 갱신 같은
+// 주변 비용이 커서 묻힌다" 였다. 재보지 않고 V 레이아웃부터 바꾸면
+// 개선하고도 전체가 안 움직일 수 있다.
 //
-// DLLAMA_ATT_PHASE=1 로 켠다. 타일 단위로 재므로 오버헤드는 작다.
-enum { ATT_PH_QK = 0, ATT_PH_SOFTMAX, ATT_PH_AV, ATT_PH_FINAL, ATT_PH_WALL, ATT_PH_N };
-static std::atomic<unsigned long long> gAttPhaseNs[ATT_PH_N];
-static const char *kAttPhaseName[ATT_PH_N] = { "qk", "softmax", "av", "finalize", "wall" };
+// **계측기가 병목의 모양을 바꾸면 안 된다.** 그래서 두 가지를 지킨다.
+//   1) 핫 경로에 atomic 이 없다. 스레드별 cache-line 정렬 카운터에 누적하고
+//      전역 합산은 리포트 시점에 한 번만 한다.
+//      (tile 마다 전역 atomic 을 치면 네 스레드가 같은 라인을 다투어
+//       coherence traffic 이 측정 대상 자체를 느리게 만든다)
+//   2) wall 은 **thread 시간의 합**이지 실제 벽시계가 아니다.
+//      thread_sum(비중 분석용)과 thread_max(멀티코어 service time 근사)를
+//      둘 다 낸다. executor 의 op wall 과 직접 비교하는 것은 thread_max 다.
+//
+// 회계 누락을 없애기 위해 setup 을 따로 잡고, 나머지는 other 로 역산한다.
+//   other = wall − (setup + qk + softmax + av + finalize)
+// KV cache append 는 이 함수 밖의 별도 op 이므로 여기서 잡히지 않는다.
+// DLLAMA_OP_PROFILE 의 op 별 시간에서 읽는다.
+//
+// DLLAMA_ATT_PHASE=1 로 켠다. 켜고 끈 상태의 attention wall 차이가 2% 를
+// 넘으면 계측 입자도를 줄여야 한다(사전등록 기준).
+enum { ATT_PH_SETUP = 0, ATT_PH_QK, ATT_PH_SOFTMAX, ATT_PH_AV, ATT_PH_FINAL,
+       ATT_PH_WALL, ATT_PH_N };
+static const char *kAttPhaseName[ATT_PH_N] =
+    { "setup", "qk", "softmax", "av", "finalize", "wall" };
+#define ATT_PH_MAX_THREADS 64u
+
+struct alignas(64) NnAttPhaseSlot {
+    unsigned long long ns[ATT_PH_N];
+    unsigned char pad[64 - ((ATT_PH_N * sizeof(unsigned long long)) % 64)];
+};
+static NnAttPhaseSlot gAttPhase[ATT_PH_MAX_THREADS];
 
 static inline bool attPhaseEnabled() {
     static const bool on = [] {
@@ -1141,30 +1163,96 @@ static inline unsigned long long attNowNs() {
     return (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-#define ATT_PH_T0(v)      const unsigned long long v = attPhaseEnabled() ? attNowNs() : 0ull
-#define ATT_PH_ADD(v, ix) do { if (attPhaseEnabled()) \
-    gAttPhaseNs[ix].fetch_add(attNowNs() - (v), std::memory_order_relaxed); } while (0)
+// 스레드별 로컬 누적기. 함수 하나가 끝날 때 슬롯에 한 번만 더한다.
+struct NnAttPhaseLocal { unsigned long long ns[ATT_PH_N]; };
+
+#define ATT_PH_T0(v)      const unsigned long long v = phOn ? attNowNs() : 0ull
+#define ATT_PH_ADD(v, ix) do { if (phOn) phl.ns[ix] += attNowNs() - (v); } while (0)
+
+// 시그널 경로 전용. printf/malloc/locale 을 쓰지 않고 write(2) 만 쓴다.
+static void sigSafeULL(char *buf, unsigned long long v, int *len) {
+    char tmp[24]; int n = 0;
+    if (v == 0ull) tmp[n++] = '0';
+    while (v > 0ull) { tmp[n++] = (char)('0' + (v % 10ull)); v /= 10ull; }
+    while (n > 0) buf[(*len)++] = tmp[--n];
+}
+void nnSigSafeDumpCounters() {
+    if (!attPhaseEnabled())
+        return;
+    char buf[512]; int len = 0;
+    const char *hdr = "[ATT_PHASE_RAW ns] ";
+    for (int i = 0; hdr[i] != '\0'; i++) buf[len++] = hdr[i];
+    unsigned long long sum[ATT_PH_N] = {0};
+    for (NnUint t = 0; t < ATT_PH_MAX_THREADS; t++)
+        for (int i = 0; i < ATT_PH_N; i++) sum[i] += gAttPhase[t].ns[i];
+    for (int i = 0; i < ATT_PH_N; i++) {
+        const char *nm = kAttPhaseName[i];
+        for (int k = 0; nm[k] != '\0'; k++) buf[len++] = nm[k];
+        buf[len++] = '=';
+        sigSafeULL(buf, sum[i], &len);
+        buf[len++] = ' ';
+    }
+    buf[len++] = '\n';
+    ssize_t r = write(1, buf, (std::size_t)len); (void)r;
+}
+
+// VERIFY_PACK 도 같은 이유로 시그널 경로에서는 write(2) 만 쓴다.
+// 워커는 SIGTERM 으로 죽으므로 이게 없으면 워커측 검증 자료를 잃는다.
+void nnSigSafeDumpVerifyPack() {
+    const char *e = std::getenv("DLLAMA_VERIFY_PACK");
+    if (e == nullptr || e[0] == '0' || e[0] == '\0')
+        return;
+    char buf[256]; int len = 0;
+    const char *hdr = "[VERIFY_PACK_RAW] comparisons=";
+    for (int i = 0; hdr[i] != '\0'; i++) buf[len++] = hdr[i];
+    sigSafeULL(buf, gVerifyPackComparisons.load(), &len);
+    const char *m = " bytes_checked=";
+    for (int i = 0; m[i] != '\0'; i++) buf[len++] = m[i];
+    sigSafeULL(buf, gVerifyPackBytes.load(), &len);
+    const char *k = " mismatches=";
+    for (int i = 0; k[i] != '\0'; i++) buf[len++] = k[i];
+    sigSafeULL(buf, gVerifyPackMismatches.load(), &len);
+    buf[len++] = '\n';
+    ssize_t r = write(1, buf, (std::size_t)len); (void)r;
+}
 
 void nnCpuOpsReportAttPhase() {
     if (!attPhaseEnabled())
         return;
-    const double wall = (double)gAttPhaseNs[ATT_PH_WALL].load() / 1e6;
-    if (wall <= 0.0)
-        return;
-    double sum = 0.0;
-    for (int i = 0; i < ATT_PH_WALL; i++)
-        sum += (double)gAttPhaseNs[i].load() / 1e6;
-    printf("[ATT_PHASE] (스레드 합산, ms)\n");
-    for (int i = 0; i < ATT_PH_WALL; i++) {
-        const double v = (double)gAttPhaseNs[i].load() / 1e6;
-        printf("%-10s %12.1f  %6.2f%%\n", kAttPhaseName[i], v, 100.0 * v / wall);
+    unsigned long long sum[ATT_PH_N] = {0};
+    unsigned long long wallMax = 0ull;
+    NnUint used = 0u;
+    for (NnUint t = 0; t < ATT_PH_MAX_THREADS; t++) {
+        if (gAttPhase[t].ns[ATT_PH_WALL] == 0ull)
+            continue;
+        used++;
+        for (int i = 0; i < ATT_PH_N; i++)
+            sum[i] += gAttPhase[t].ns[i];
+        if (gAttPhase[t].ns[ATT_PH_WALL] > wallMax)
+            wallMax = gAttPhase[t].ns[ATT_PH_WALL];
     }
-    printf("%-10s %12.1f\n", "phase합", sum);
-    printf("%-10s %12.1f\n", "wall", wall);
-    // 사전등록 판정: phase 합이 wall 의 +-5% 안이어야 계측을 신뢰한다
-    const double err = 100.0 * (sum - wall) / wall;
-    printf("잔차 %+.2f%%  -> %s\n", err,
-        (err > -5.0 && err < 5.0) ? "OK (+-5% 이내)" : "계측 수정 필요");
+    if (used == 0u)
+        return;
+    const double wallSum = (double)sum[ATT_PH_WALL] / 1e6;
+    double named = 0.0;
+    for (int i = 0; i < ATT_PH_WALL; i++)
+        named += (double)sum[i] / 1e6;
+    printf("[ATT_PHASE] threads=%u  (ms)\n", used);
+    for (int i = 0; i < ATT_PH_WALL; i++) {
+        const double v = (double)sum[i] / 1e6;
+        printf("%-10s %12.1f  %6.2f%%\n", kAttPhaseName[i], v, 100.0 * v / wallSum);
+    }
+    const double other = wallSum - named;
+    printf("%-10s %12.1f  %6.2f%%   (역산: wall - 위 합)\n", "other", other,
+        100.0 * other / wallSum);
+    printf("%-10s %12.1f   <- 비중 분석용\n", "thread_sum", wallSum);
+    printf("%-10s %12.1f   <- executor op wall 과 비교할 값\n", "thread_max",
+        (double)wallMax / 1e6);
+    // 회계 검산: other 가 음수이거나 과도하면 계측 경계가 잘못된 것이다.
+    const double frac = 100.0 * other / wallSum;
+    printf("회계 %s  (other %+.2f%%)\n",
+        (frac >= -1.0 && frac <= 15.0) ? "OK" : "확인 필요", frac);
+    printf("주의: KV append 는 이 함수 밖의 op 다. DLLAMA_OP_PROFILE 에서 읽는다.\n");
 }
 
 static void multiheadAttFused_F32(
@@ -1177,6 +1265,9 @@ static void multiheadAttFused_F32(
     const NnUint nThreads, const NnUint threadIndex)
 {
     (void)seqLen;
+    const bool phOn = attPhaseEnabled();
+    NnAttPhaseLocal phl;
+    if (phOn) std::memset(&phl, 0, sizeof(phl));
     ATT_PH_T0(tWall);
     const NnUint kvMul = nHeads / nKvHeads;
     const float headDimRoot = sqrtf(headDim);
@@ -1245,6 +1336,7 @@ static void multiheadAttFused_F32(
                 maxPos = p;
         }
 
+        ATT_PH_T0(tSetup);
         const NnUint nSlots = bCount * nHeadsInGroup;
         if (scratch.size() < (std::size_t)nSlots * TILE)
             scratch.resize((std::size_t)nSlots * TILE);
@@ -1255,6 +1347,7 @@ static void multiheadAttFused_F32(
             for (NnUint b = 0; b < bCount; b++)
                 std::memset(&((float *)outputs[bBase + b])[(h0Base + j) * headDim], 0, headDim * sizeof(float));
         }
+        ATT_PH_ADD(tSetup, ATT_PH_SETUP);
 
         for (NnUint t0 = 0; t0 <= maxPos; t0 += TILE) {
             const NnUint t1 = std::min(t0 + TILE, maxPos + 1u);
@@ -1478,6 +1571,11 @@ static void multiheadAttFused_F32(
         } // b-타일
     }
     ATT_PH_ADD(tWall, ATT_PH_WALL);
+    // 전역 반영은 여기서 한 번뿐이다. 핫 경로에는 공유 쓰기가 없다.
+    if (phOn && threadIndex < ATT_PH_MAX_THREADS) {
+        for (int i = 0; i < ATT_PH_N; i++)
+            gAttPhase[threadIndex].ns[i] += phl.ns[i];
+    }
 }
 
 

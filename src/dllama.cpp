@@ -13,6 +13,8 @@
 void reportOpProfile();
 void nnReportVerifyPackSummary();
 void nnCpuOpsReportAttPhase();
+void nnSigSafeDumpCounters();
+void nnSigSafeDumpVerifyPack();
 void markPrefillEndOpProfile();
 #include <climits>
 #include <stdexcept>
@@ -1130,10 +1132,18 @@ static void printUsage() {
     printf("  --help\n");
 }
 
+// SIGTERM 핸들러에서 printf 계열을 부르면 안 된다 — async-signal-safe 가 아니라
+// 드물게 deadlock 이나 잘린 로그를 만들고, 그러면 **artifact 가 시그널 타이밍에
+// 의존하게 된다.** 정상 경로 리포트가 1차 자료이고, 여기서는 write(2) 로
+// 원시 카운터만 남긴다(보조 자료).
+static void sigSafeWrite(const char *s) {
+    std::size_t n = 0; while (s[n] != '\0') n++;
+    ssize_t r = write(1, s, n); (void)r;
+}
 static void verifyPackSignalHandler(int sig) {
-    nnReportVerifyPackSummary();
-    nnCpuOpsReportAttPhase();
-    std::fflush(stdout);
+    sigSafeWrite("[SIGNAL_EXIT] 정상 경로 리포트가 아니다. 보조 자료로만 쓴다.\n");
+    nnSigSafeDumpVerifyPack();
+    nnSigSafeDumpCounters();
     _exit(sig == SIGINT ? 130 : 143);
 }
 

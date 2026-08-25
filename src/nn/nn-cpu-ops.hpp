@@ -57,6 +57,8 @@ void nnCpuOpsSetAttnFused(int mode);
 void nnCpuOpsSetCpRange(NnUint cpSize, NnUint cpRank); // Ring CP: 노드별 토큰 행 윈도우
 void nnReportVerifyPackSummary();                     // DLLAMA_VERIFY_PACK 요약
 void nnCpuOpsReportAttPhase();                        // DLLAMA_ATT_PHASE — attention 내부 분해
+void nnSigSafeDumpCounters();                         // 시그널 경로 전용 (write(2) 만)
+void nnSigSafeDumpVerifyPack();                       // 시그널 경로 전용 (write(2) 만)
 void nnCpuOpsSetPrune(NnUint layerIndex, float keepRatio); // 토큰 가지치기 (research/10)
 void nnCpuOpsResetActiveRows();
 NnUint nnCpuOpsGetActiveRows(); // -1=auto(배치 폭으로), 0=off, 1=on
