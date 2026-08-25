@@ -1,8 +1,7 @@
 # 05. 설계 공간 — 왜 TP/CP/core split/복잡한 partition 이 아닌가
 
 논문 본문에는 이 절이 **짧게** 들어간다. 최종 시스템이 왜 지금의 형태인지
-설명하는 데 필요한 만큼만이다. 상세 기각 근거는
-[06-rejected.md](06-rejected.md) 와 `research/16` §12 에 있다.
+설명하는 데 필요한 만큼만이다. 상세 근거는 `research/16` §12 에 있다.
 
 ---
 
@@ -60,7 +59,7 @@ intra-stage 병렬 이득  ≤  1 / (M + N − 2)
 `S=1789`, `B=32`, `N=8` 이면 `M=56` 이므로 상한이 `1/62 ≈ 1.6%` 다.
 구현 비용과 통신 증가를 감당할 값이 아니다.
 
-이 보조정리 하나가 CoRePP(core split)와 CP island 를 함께 닫는다.
+이 보조정리 하나가 core split 계열과 context-parallel island 계열을 함께 닫는다.
 
 ---
 

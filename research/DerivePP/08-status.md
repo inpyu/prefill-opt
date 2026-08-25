@@ -6,17 +6,19 @@
 
 ## 8.1 논문 구조 재편 (2026-08-25)
 
-**AxisCert 와 여러 축을 논문 중심에서 내리고, `Wave Pipeline + SharedPack` 의
-계층적 co-design 으로 재구성했다.**
+**논문 중심을 `Wave Pipeline + SharedPack` 의 계층적 co-design 으로 재구성했다.**
+계획 탐색 절차와 효과 없던 병렬화 축들은 본문에서 내렸다.
 
 | 구분 | 내용 |
 |---|---|
 | **본문 핵심** | Wave Pipeline (노드 간), SharedPack (노드 내), 둘의 co-design |
 | 본문에 남김 | `B`(wave 실행 파라미터), `N`(스테이지 수·확장 곡선), 균등 layer partition, TP/CP 를 안 쓴 이유(짧게) |
-| **본문에서 뺌** | `p` sublayer partition DP, `r` CoRePP core split, `g` CP2 island, `π` placement, potential, 축별 `δ_x`, plateau, completion-vector Pareto DP 상세 |
-| 옮긴 곳 | Appendix / design-space 절 / negative-result 문서 |
+| **본문에서 뺌** | 계획 탐색 절차 전반과, 측정에서 비활성으로 나온 병렬화 축들 (근거는 `research/16` §7·§12) |
+| 옮긴 곳 | 이 폴더에서 삭제. 원 기록은 `research/16~21` 에 남아 있다 |
 
-이유는 [06-not-adopted-axiscert.md](06-not-adopted-axiscert.md) 에 있다.
+**시도했다가 도입하지 않은 것은 이 폴더에 두지 않는다.** 현재 설계를 지금 형태로
+만든 트러블슈팅만 남긴다 — 그것은 [03](03-sharedpack.md) §5.2,
+[05](05-design-space.md), [07](07-measurement.md) §7.5 에 있다.
 
 ---
 

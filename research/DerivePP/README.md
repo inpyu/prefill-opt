@@ -49,8 +49,6 @@
 | [03-sharedpack.md](03-sharedpack.md) | **기여 2.** 노드 내 exact shared packing |
 | [04-codesign.md](04-codesign.md) | **기여 3.** 2×2 ablation 과 recurrence 검증 |
 | [05-design-space.md](05-design-space.md) | 왜 TP/CP/core split/복잡한 partition 이 아닌가 |
-| [06-rejected.md](06-rejected.md) | 검토했으나 채택하지 않은 설계 |
-| [06-not-adopted-axiscert.md](06-not-adopted-axiscert.md) | AxisCert — 핵심 기여에서 내린 이유와 보존 |
 | [07-measurement.md](07-measurement.md) | 측정 방법론과 검증 계층 |
 | [08-status.md](08-status.md) | 현재 상태, 진행 중, 리스크 |
 

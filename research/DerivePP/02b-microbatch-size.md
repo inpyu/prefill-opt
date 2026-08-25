@@ -1,7 +1,6 @@
 # 02b. `B` — Wave Pipeline 의 실행 파라미터
 
 > **위치.** `B` 는 최적화 "축" 이 아니라 **Wave Pipeline 의 실행 파라미터**다.
-> AxisCert 의 언어로 설명하지 않는다. → [06-not-adopted-axiscert.md](06-not-adopted-axiscert.md)
 
 ## 2b.1 상충 관계
 
@@ -81,8 +80,7 @@ schedTotal = ceil(realTotal / 4) × 4
 최적 B:   S=512 → 16,   S=2048 → 32,   S=7212 → 16
 ```
 
-`B ∝ S` 도 `B ∝ √S` 도 성립하지 않는다. 그래서 두 규칙 모두 기각했다.
-→ [06-rejected.md](06-rejected.md)
+`B ∝ S` 도 `B ∝ √S` 도 성립하지 않는다. 그래서 두 규칙 모두 쓰지 않는다.
 
 ## 2b.5 효과
 
