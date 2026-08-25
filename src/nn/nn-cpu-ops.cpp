@@ -1993,10 +1993,46 @@ static void matmulForward_F32_F32_F32(NnUint nThreads, NnUint threadIndex, NnUin
 //   서로 다른 batch-row group 을 **하나의 버퍼**에 병렬로 쓸 수 있다.
 //
 // 출력 레이아웃은 커널이 기대하는 것과 동일하다: [group][kBlocks] (group = 4행 묶음).
+// DLLAMA_VERIFY_PACK 요약 카운터.
+//
+// mismatch 가 있을 때만 출력하면 "검증했고 0건" 과 "환경변수가 빠져 아예 검증하지
+// 않음" 을 구분할 수 없다. 종료 시 항상 요약을 찍어 artifact 로 남긴다.
+static std::atomic<unsigned long long> gVerifyPackComparisons(0);
+static std::atomic<unsigned long long> gVerifyPackBytes(0);
+static std::atomic<unsigned long long> gVerifyPackMismatches(0);
+
+static void nnVerifyPackAccum(unsigned long long comparisons, unsigned long long bytes) {
+    gVerifyPackComparisons.fetch_add(comparisons, std::memory_order_relaxed);
+    gVerifyPackBytes.fetch_add(bytes, std::memory_order_relaxed);
+}
+static void nnVerifyPackMismatch() {
+    gVerifyPackMismatches.fetch_add(1ull, std::memory_order_relaxed);
+}
+
+void nnReportVerifyPackSummary() {
+    const char *e = std::getenv("DLLAMA_VERIFY_PACK");
+    if (e == nullptr || atoi(e) == 0)
+        return;
+    printf("[VERIFY_PACK_SUMMARY]\n");
+    printf("comparisons=%llu\n", (unsigned long long)gVerifyPackComparisons.load());
+    printf("bytes_checked=%llu\n", (unsigned long long)gVerifyPackBytes.load());
+    printf("mismatches=%llu\n", (unsigned long long)gVerifyPackMismatches.load());
+}
+
 static void packQ80x4Forward(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
 #if NN_REPACK_AVAILABLE
     // size2D(floatType, y, x) — **y 가 행 수, x 가 폭**이다.
     // 처음에 inputSize.y 를 K 로 읽어 kBlocks 가 1 이 됐다(행 수 32 / 32).
+    //
+    // 출력 버퍼는 입력과 **같은 F_Q80 shape** 로 선언한다. block_q8_0x4 는
+    // NnBlockQ80 의 재배열일 뿐이라 바이트 수가 정확히 같기 때문이다:
+    //     nBatches * kBlocks * 34  ==  (nBatches/4) * kBlocks * sizeof(block_q8_0x4)
+    // 덕분에 버퍼 폭이 곧 K 이고, 폭을 직접 계산하다 틀릴 여지가 없다.
+    ASSERT_EQ(context->inputSize.x, context->outputSize.x);
+    ASSERT_EQ(context->inputSize.y, context->outputSize.y);
+    ASSERT_EQ(context->inputSize.floatType, F_Q80);
+    ASSERT_EQ(context->outputSize.floatType, F_Q80);
+    ASSERT_EQ(context->inputSize.x % Q40_BLOCK_SIZE, 0u);
     const NnUint kElems = context->inputSize.x;
     const NnUint kBlocks = kElems / Q40_BLOCK_SIZE;
     // input/output 은 배치 행 포인터 배열이다. pack 은 그룹(4행) 단위로 선형 접근하므로
@@ -2065,10 +2101,26 @@ static bool matmulForward_repack(NnUint nThreads, NnUint threadIndex, NnUint bat
         const block_q8_0x4 *xr;
         thread_local std::vector<NnByte> scratch;
         if (mmCfg != nullptr && mmCfg->prepackedBufferIndex != NN_NO_PREPACK) {
+            // 항상 켜진 검사 — 개발용 검증기(DLLAMA_VERIFY_PACK)가 없어도
+            // shape 오류는 여기서 즉시 막는다. 실제로 이 두 조건이 각각
+            // 축 규약 오독 두 건을 통과시켰다(research/19 §8.5).
+            //   1) pack 입력 폭 == 이 matmul 의 K
+            //   2) 버퍼 용량 >= rowGroups * kBlocks * sizeof(block_q8_0x4)
+            const NnBufferConfig *pbc = &context->bufferConfigs[mmCfg->prepackedBufferIndex];
+            ASSERT_EQ(pbc->size.x, kElems);
+            const std::size_t needBytes =
+                (std::size_t)((rowBegin + nGemm + 3u) / 4u) * kBlocks * sizeof(block_q8_0x4);
+            if ((std::size_t)pbc->size.nBytes < needBytes) {
+                printf("Assertion failed: prepacked buffer %u too small: %zu < %zu "
+                       "(kElems=%u kBlocks=%u rowBegin=%u nGemm=%u)\n",
+                    mmCfg->prepackedBufferIndex, (std::size_t)pbc->size.nBytes, needBytes,
+                    kElems, kBlocks, rowBegin, nGemm);
+                exit(-1);
+            }
             xr = (const block_q8_0x4 *)context->buffers[mmCfg->prepackedBufferIndex]
                  + (std::size_t)(rowBegin / 4u) * kBlocks;
             // 진단(DLLAMA_VERIFY_PACK=1): 공유 버퍼가 이 op 이 기대하는 것과 같은가.
-            // pack op 은 inputSize.y 로, matmul 은 weightSize.y 로 kBlocks 를 잡는다.
+            // pack op 은 inputSize.x 로, matmul 은 weightSize.y 로 K 를 잡는다.
             // 둘이 어긋나거나 쓰기가 누락되면 여기서 잡힌다.
             static const bool verifyPack = []() {
                 const char *e = std::getenv("DLLAMA_VERIFY_PACK");
@@ -2076,11 +2128,15 @@ static bool matmulForward_repack(NnUint nThreads, NnUint threadIndex, NnUint bat
             }();
             if (verifyPack && threadIndex == 0) {
                 static std::atomic<int> reported(0);
+                nnVerifyPackAccum(1ull, (unsigned long long)nGemm / 4ull * kBlocks * sizeof(block_q8_0x4));
                 std::vector<NnByte> ref((std::size_t)(nGemm / 4u) * kBlocks * sizeof(block_q8_0x4));
                 block_q8_0x4 *rp = (block_q8_0x4 *)ref.data();
                 for (NnUint g = 0; g < nGemm / 4u; g++)
                     nnPackQ80To4x4(&x80[(std::size_t)g * 4u * kBlocks], &rp[(std::size_t)g * kBlocks], kBlocks);
-                if (std::memcmp(ref.data(), xr, ref.size()) != 0 && reported.fetch_add(1) < 12) {
+                const bool bad = std::memcmp(ref.data(), xr, ref.size()) != 0;
+                if (bad)
+                    nnVerifyPackMismatch();
+                if (bad && reported.fetch_add(1) < 12) {
                     const NnByte *a = (const NnByte *)xr;
                     std::size_t i = 0;
                     while (i < ref.size() && a[i] == ref[i]) i++;
@@ -2793,9 +2849,8 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType) {
         if (quantType == F32_F32_Q80) return repeatZForward_F32_Q80;
     }
     if (code == OP_PACK_Q80X4) {
-        // 입력은 Q80, 출력 버퍼는 F_32 로 선언돼 있다(바이트 컨테이너로만 쓴다).
-        // 실제 내용은 block_q8_0x4 이며 프레임워크는 이를 해석하지 않는다.
-        if (quantType == Q80_Q80_F32) return packQ80x4Forward;
+        // 입출력 모두 F_Q80 shape 다. 내용은 block_q8_0x4 재배열이며
+        // 프레임워크는 이를 해석하지 않는다(바이트 수는 동일).
         if (quantType == Q80_Q80_Q80) return packQ80x4Forward;
     }
     if (code == OP_SHIFT) {

@@ -387,12 +387,17 @@ LlmNet buildLlmNet(
         const bool dPackAllowed = (spMode == 1) || (spMode == 2) || (spMode == 4);
         const bool prepackUse = spMode != 4;
 
+        // packed 버퍼는 **원본 Q80 버퍼와 같은 shape** 로 선언한다.
+        // block_q8_0x4 는 NnBlockQ80 의 재배열이라 바이트 수가 정확히 같다:
+        //     nBatches * kBlocks * 34 == (nBatches/4) * kBlocks * sizeof(block_q8_0x4)
+        // 폭이 곧 K 이므로 폭을 직접 계산하다 틀릴 여지가 없다.
+        // (F_32 를 바이트 컨테이너로 쓰던 이전 방식이 크기 오류를 숨겼다 — research/19 §8.5)
+        //
+        // Q/K/V 와 Gate/Up 의 K 는 모두 qSlice.n = w1Slice.n = h->dim 이다.
         const bool yPackOn = sharedPackEnabled && yPackAllowed && (h->syncType == F_Q80) &&
-                             (h->dim % Q40_BLOCK_SIZE == 0u) &&
-                             ((h->dim / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
+                             (h->dim % Q40_BLOCK_SIZE == 0u);
         const NnUint yPackBufferIndex = yPackOn
-            ? nodeBuilder.addBuffer("y_pack", size2D(F_32, nBatches,
-                  (h->dim / Q40_BLOCK_SIZE) * 34u / 4u))
+            ? nodeBuilder.addBuffer("y_pack", size2D(F_Q80, nBatches, h->dim))
             : 0u;
 
         // Down 의 K 는 w2Slice.n0 다. matmul_w2 는 size2D(t, n0, d) 로 선언되고
@@ -400,11 +405,9 @@ LlmNet buildLlmNet(
         // 처음에 w2Slice.d(=출력 4096)를 K 로 잡아 버퍼가 3.5배 작았다.
         const NnUint w2K = n.w2Slice.n0;
         const bool sharedPackOn = sharedPackEnabled && dPackAllowed && (h->syncType == F_Q80) &&
-                                  (w2K % Q40_BLOCK_SIZE == 0u) &&
-                                  ((w2K / Q40_BLOCK_SIZE) * 34u % 4u == 0u);
+                                  (w2K % Q40_BLOCK_SIZE == 0u);
         const NnUint dPackBufferIndex = sharedPackOn
-            ? nodeBuilder.addBuffer("d_pack", size2D(F_32, nBatches,
-                  (w2K / Q40_BLOCK_SIZE) * 34u / 4u))
+            ? nodeBuilder.addBuffer("d_pack", size2D(F_Q80, nBatches, w2K))
             : 0u;
 
         // moe

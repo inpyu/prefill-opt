@@ -7,7 +7,11 @@
 #include "llm.hpp"
 #include "tokenizer.hpp"
 #include "app.hpp"
+#include <csignal>
+#include <unistd.h>
+
 void reportOpProfile();
+void nnReportVerifyPackSummary();
 void markPrefillEndOpProfile();
 #include <climits>
 #include <stdexcept>
@@ -1125,7 +1129,17 @@ static void printUsage() {
     printf("  --help\n");
 }
 
+static void verifyPackSignalHandler(int sig) {
+    nnReportVerifyPackSummary();
+    std::fflush(stdout);
+    _exit(sig == SIGINT ? 130 : 143);
+}
+
 int main(int argc, char **argv) {
+    // 워커는 SIGTERM 으로 종료되므로 요약을 여기서 찍지 않으면 artifact 에 남지 않는다.
+    std::signal(SIGTERM, verifyPackSignalHandler);
+    std::signal(SIGINT, verifyPackSignalHandler);
+
     initQuants();
     initSockets();
 
@@ -1157,6 +1171,10 @@ int main(int argc, char **argv) {
         returnCode = EXIT_FAILURE;
     }
 
+    // 검증기 요약은 root/worker 양쪽에서, 정상·예외 종료 모두에서 찍는다.
+    // "검증했고 0건" 과 "검증 자체를 안 함" 을 artifact 만으로 구분하기 위해서다.
+    // 워커는 보통 SIGTERM 으로 죽으므로 핸들러에서도 찍는다(main 끝에 도달하지 못한다).
+    nnReportVerifyPackSummary();
     cleanupSockets();
     return returnCode;
 }

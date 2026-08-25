@@ -54,7 +54,8 @@ typedef struct {
 // prefill/decode 단계를 op 계층에 알린다. NnExecutor::setDecodePhase 에서 호출된다.
 void nnCpuOpsSetDecodePhase(bool isDecodePhase);
 void nnCpuOpsSetAttnFused(int mode);
-void nnCpuOpsSetCpRange(NnUint cpSize, NnUint cpRank); // Ring CP: 노드별 토큰 행 윈도우
+void nnCpuOpsSetCpRange(NnUint cpSize, NnUint cpRank);
+void nnReportVerifyPackSummary(); // DLLAMA_VERIFY_PACK 요약 (검증 실행 여부까지 드러낸다) // Ring CP: 노드별 토큰 행 윈도우
 void nnCpuOpsSetPrune(NnUint layerIndex, float keepRatio); // 토큰 가지치기 (research/10)
 void nnCpuOpsResetActiveRows();
 NnUint nnCpuOpsGetActiveRows(); // -1=auto(배치 폭으로), 0=off, 1=on

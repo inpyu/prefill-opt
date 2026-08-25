@@ -1,3 +1,13 @@
+# ⚠️ 무효 — pack 축 규약 오독 빌드의 결과다. 최종 결과가 아니다.
+#
+# 이 표의 SP 행 hash `895c8b182e9c` 는 packQ80x4Forward 가 kElems 를
+# inputSize.y(행 수 32)로 읽어 kBlocks=1 로 쓰던 시절의 산물이다.
+# d_pack 버퍼 폭도 w2Slice.d(=4096, 출력)로 잡혀 Down 의 K(14336)보다 3.5배 작았다.
+# 근본 원인과 수정: research/19 §8.5, commit 190a471
+#
+# 최종 유효 결과 -> artifacts/n8_ab/results_anchor_valid.tsv
+#   (수정 후 SP hash 는 BASE 와 동일한 c52e50e37e65 다)
+#
 seq	mode	prefillMs	syncWaitMs	syncXferMs	md5	temp
 0	BASE	7718.42	3884.47	13.02	c52e50e37e65	51.2->54.0
 1	BASE	7678.53	3924.00	13.15	c52e50e37e65	51.2->52.9

@@ -1,0 +1,39 @@
+# SharedPack-SDOT 정확성 매트릭스 — N=8, Llama3-8B Q40, prompt 512 토큰
+#
+# 목적: E2E logits hash 만으로는 커널 정확성을 보장하지 못한다(research/19 §8.7).
+#       DLLAMA_VERIFY_PACK=1 이 matmul 이 소비하는 packed 표현을 직접 대조한다.
+#       요약은 root/worker 모두 종료 시 항상 출력되므로 "검증 실행 여부" 자체가
+#       artifact 로 남는다 (comparisons=0 & SP=1 이면 검증이 안 돌았다는 뜻).
+#
+# 열 설명
+#   wave        --wave-pipeline
+#   sp          DLLAMA_SHARED_PACK (0=BASE, 1=SharedPack)
+#   prefillMs   검증기 오버헤드 포함. 성능 수치로 쓰지 말 것 -> results_anchor_valid.tsv
+#   md5         프리필 종료 시점 logits f32 raw dump 의 md5 앞 12자리
+#   rootCmp/Mis root 의 packed 표현 비교 횟수 / 불일치 수
+#   wkCmp/Mis   워커 7대 합계
+#   bin         dllama 바이너리 md5 앞 8자리
+#
+# 기대값: 32 레이어 x 6 prepacked matmul x 14 chunk = 2688 비교
+#         root(4레이어)=336, 워커 7대 합계=2352, 합 2688 — N=1 단독 실행과 일치
+#
+# 판정
+#   SP 의 logits 가 같은 wave 조건의 BASE 와 **비트 단위로 동일**하고,
+#   packed 표현 불일치가 0 이다. 정확성 계층 1(packed bytes)과 4(final logits)를
+#   동시에 통과했다.
+#
+# 주의: wave on 과 wave off 의 BASE hash 가 서로 다르다(c52e.. vs 8b81..).
+#       이는 SharedPack 이전부터 있던 wave 경로의 수치 차이이며 SP 와 무관하다
+#       (research/19 §8.2). 비교는 반드시 **같은 wave 조건 안에서** 한다.
+#
+# 명령: DLLAMA_VERIFY_PACK=1 DLLAMA_SHARED_PACK=$sp ./dllama inference \
+#         --nthreads 4 --buffer-float-type q80 --max-seq-len 1024 --steps 453 \
+#         --seed 42 --temperature 0 --tile-aligned 1 --n-batches 32 \
+#         --prefill-chunk-size 32 --pp-layers 8,8,8,8,8,8,8,8 --workers <7 nodes>
+# 원본 로그: raw/correct_w{1,0}_sp{0,1}.log
+#
+wave	sp	prefillMs	md5	rootCmp	rootMis	wkCmp	wkMis	bin
+1	0	7742.70	c52e50e37e65	0	0	0	0	a6c22236
+1	1	5113.64	c52e50e37e65	336	0	2352	0	a6c22236
+0	0	34459.12	8b8178a50a97	0	0	0	0	a6c22236
+0	1	27000.08	8b8178a50a97	336	0	2352	0	a6c22236
