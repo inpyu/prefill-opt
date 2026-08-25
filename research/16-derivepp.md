@@ -2995,6 +2995,16 @@ CoRePP(§12.3), CP island(§12.4), 커널 최적화 4종·KV skip(§12.1),
 | 위 + 공식 baseline 로그·manifest 완비 | 제출 가능 |
 | 위 + 13B capacity + held-out 모델 검증 | 강한 제출 |
 
+**연산 계층의 novelty 경로** (`research/21` §6). SharedPack 을 어디까지 밀지에 따라
+기여의 위치가 달라진다.
+
+| 수준 | novelty |
+|---|---|
+| 현재 구현 그대로 | 독립 알고리즘 기여는 **약함** — 선행(FBGEMM / MKL packed API / llama.cpp `repack.cpp`)과 구별되지 않는다 |
+| DerivePP 내부의 연산 기여 | **충분히 강함** — 현재 여기로 제시한다 |
+| graph-hoisted packing + cache gate + cross-projection reuse + lifetime 관리 | **중간 이상** |
+| 위 + pipeline critical-path 모델 + 자동 선택 + 다중 모델·CPU 검증 | **주요 기여 후보** |
+
 **우선순위 (2026-08-19 기준).**
 
 1. ~~문서 헤드라인을 시스템 중심으로 재정렬~~ — 완료(§0, §13, §14)
