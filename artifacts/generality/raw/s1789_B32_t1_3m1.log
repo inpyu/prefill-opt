@@ -90,126 +90,78 @@
 🫧 Prefill interleave: on (quota=8 decode steps)
 can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting variance accumulates token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first enough to run language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting variance accumulates over deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw transfer, and synchronization wait separates designs that scale from those that merely appear to. Thermal behaviour adds another dimension because sustained load reduces clock frequency unevenly across nodes, producing stragglers that collective operations cannot hide. The resulting variance accumulates over than the fabrics used in datacenter deployments. Scheduling therefore matters more than raw throughput. During the prefill phase the system must construct the key value cache for every token at every layer before the first output token can be produced. phase the system must construct the key value cache for every token at every layer before the first output token can be produced. This phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable phase is compute bound and its cost grows with prompt length. Communication patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. patterns that are acceptable when bandwidth is plentiful become dominant when it is not. Understanding where the time actually goes is the first requirement for any principled optimization. Careful measurement of computation, transfer, and synchronization wait separates designs that scale have become capable enough to run language models locally. A cluster of such devices connected over commodity Ethernet can share the memory and compute required for larger models, but the interconnect is orders of magnitude slower than the fabrics used is not. Understanding where the time actually goes is the first requirement for any principled optimization.
 🌊 Wave pipelining enabled (pp=8)
-🌊 [R0] mb=0 batch=32 fs=0.0 fe=680.3
-🌊 [R0] mb=1 batch=32 fs=680.3 fe=1369.6
-🌊 [R0] mb=2 batch=32 fs=1369.6 fe=2068.0
-🌊 [R0] mb=3 batch=32 fs=2068.0 fe=2776.2
-🌊 [R0] mb=4 batch=32 fs=2776.2 fe=3498.2
-🌊 [R0] mb=5 batch=32 fs=3498.2 fe=4229.0
-🌊 [R0] mb=6 batch=32 fs=4229.0 fe=4970.9
-🌊 [R0] mb=7 batch=32 fs=4971.0 fe=5724.3
-🌊 [R0] mb=8 batch=32 fs=5724.3 fe=6486.9
-🌊 [R0] mb=9 batch=32 fs=6486.9 fe=7327.0
-🌊 [R0] mb=10 batch=32 fs=7327.0 fe=8110.5
-🌊 [R0] mb=11 batch=32 fs=8110.5 fe=8903.5
-🌊 [R0] mb=12 batch=32 fs=8903.6 fe=9709.6
-🌊 [R0] mb=13 batch=32 fs=9709.6 fe=10526.8
-🌊 [R0] mb=14 batch=32 fs=10526.8 fe=11352.3
-🌊 [R0] mb=15 batch=32 fs=11352.3 fe=12187.9
-🌊 [R0] mb=16 batch=32 fs=12187.9 fe=13034.1
-🌊 [R0] mb=17 batch=32 fs=13034.1 fe=13893.6
-🌊 [R0] mb=18 batch=32 fs=13893.6 fe=14762.1
-🌊 [R0] mb=19 batch=32 fs=14762.1 fe=15642.3
-🌊 [R0] mb=20 batch=32 fs=15642.3 fe=16530.8
-🌊 [R0] mb=21 batch=32 fs=16530.8 fe=17431.9
-🌊 [R0] mb=22 batch=32 fs=17431.9 fe=18341.1
-🌊 [R0] mb=23 batch=32 fs=18341.1 fe=19260.9
-🌊 [R0] mb=24 batch=32 fs=19260.9 fe=20191.8
-🌊 [R0] mb=25 batch=32 fs=20191.8 fe=21136.1
-🌊 [R0] mb=26 batch=32 fs=21136.1 fe=22091.3
-🌊 [R0] mb=27 batch=32 fs=22091.3 fe=23054.6
-🌊 [R0] mb=28 batch=32 fs=23054.6 fe=24029.0
-🌊 [R0] mb=29 batch=32 fs=24029.0 fe=25026.0
-🌊 [R0] mb=30 batch=32 fs=25026.2 fe=26022.4
-🌊 [R0] mb=31 batch=32 fs=26022.4 fe=27027.2
-🌊 [R0] mb=32 batch=32 fs=27027.2 fe=28044.8
-🌊 [R0] mb=33 batch=32 fs=28044.9 fe=29070.1
-🌊 [R0] mb=34 batch=32 fs=29070.1 fe=30106.4
-🌊 [R0] mb=35 batch=32 fs=30106.4 fe=31156.1
-🌊 [R0] mb=36 batch=32 fs=31156.1 fe=32214.2
-🌊 [R0] mb=37 batch=32 fs=32214.2 fe=33282.4
-🌊 [R0] mb=38 batch=32 fs=33282.4 fe=34362.1
-🌊 [R0] mb=39 batch=32 fs=34362.1 fe=35453.8
-🌊 [R0] mb=40 batch=32 fs=35453.8 fe=36553.9
-🌊 [R0] mb=41 batch=32 fs=36553.9 fe=37664.2
-🌊 [R0] mb=42 batch=32 fs=37664.2 fe=38813.2
-🌊 [R0] mb=43 batch=32 fs=38813.2 fe=39948.2
-🌊 [R0] mb=44 batch=32 fs=39948.3 fe=41092.7
-🌊 [R0] mb=45 batch=32 fs=41092.8 fe=42247.7
-🌊 [R0] mb=46 batch=32 fs=42247.7 fe=43410.9
-🌊 [R0] mb=47 batch=32 fs=43410.9 fe=44584.2
-🌊 [R0] mb=48 batch=32 fs=44584.2 fe=45823.0
-🌊 [R0] mb=49 batch=32 fs=45823.0 fe=47018.2
-🌊 [R0] mb=50 batch=32 fs=47018.2 fe=48224.1
-🌊 [R0] mb=51 batch=32 fs=48224.1 fe=49441.9
-🌊 [R0] mb=52 batch=32 fs=49441.9 fe=50669.3
-🌊 [R0] mb=53 batch=32 fs=50669.3 fe=51907.8
-🌊 [R0] mb=54 batch=32 fs=51907.8 fe=53156.1
-🌊 [R0] mb=55 batch=32 fs=53156.1 fe=54414.5
+🌊 [R0] mb=0 batch=32 fs=0.0 fe=685.1
+🌊 [R0] mb=1 batch=32 fs=685.1 fe=1382.4
+🌊 [R0] mb=2 batch=32 fs=1382.5 fe=2084.1
+🌊 [R0] mb=3 batch=32 fs=2084.2 fe=2796.0
+🌊 [R0] mb=4 batch=32 fs=2796.0 fe=3524.9
+🌊 [R0] mb=5 batch=32 fs=3524.9 fe=4275.4
+🌊 [R0] mb=6 batch=32 fs=4275.4 fe=5041.9
+🌊 [R0] mb=7 batch=32 fs=5042.0 fe=5806.5
+🌊 [R0] mb=8 batch=32 fs=5806.5 fe=6618.6
+🌊 [R0] mb=9 batch=32 fs=6618.6 fe=7402.4
+🌊 [R0] mb=10 batch=32 fs=7402.4 fe=8187.5
+🌊 [R0] mb=11 batch=32 fs=8187.5 fe=8998.7
+🌊 [R0] mb=12 batch=32 fs=8998.7 fe=9831.0
+🌊 [R0] mb=13 batch=32 fs=9831.0 fe=10660.7
+🌊 [R0] mb=14 batch=32 fs=10660.7 fe=11506.8
+🌊 [R0] mb=15 batch=32 fs=11506.8 fe=12361.9
+🌊 [R0] mb=16 batch=32 fs=12361.9 fe=13234.2
+🌊 [R0] mb=17 batch=32 fs=13234.2 fe=14111.9
+🌊 [R0] mb=18 batch=32 fs=14111.9 fe=15003.3
+🌊 [R0] mb=19 batch=32 fs=15003.3 fe=15906.5
+🌊 [R0] mb=20 batch=32 fs=15906.5 fe=16824.6
+🌊 [R0] mb=21 batch=32 fs=16824.6 fe=17748.3
+🌊 [R0] mb=22 batch=32 fs=17748.3 fe=18679.8
+🌊 [R0] mb=23 batch=32 fs=18679.8 fe=19623.7
+🌊 [R0] mb=24 batch=32 fs=19623.7 fe=20564.2
+🌊 [R0] mb=25 batch=32 fs=20564.2 fe=21511.9
+🌊 [R0] mb=26 batch=32 fs=21511.9 fe=22470.7
+🌊 [R0] mb=27 batch=32 fs=22470.7 fe=23440.8
+🌊 [R0] mb=28 batch=32 fs=23440.8 fe=24485.1
+🌊 [R0] mb=29 batch=32 fs=24485.1 fe=25472.7
+🌊 [R0] mb=30 batch=32 fs=25472.8 fe=26475.7
+🌊 [R0] mb=31 batch=32 fs=26475.7 fe=27487.3
+🌊 [R0] mb=32 batch=32 fs=27487.3 fe=28503.8
+🌊 [R0] mb=33 batch=32 fs=28503.8 fe=29529.7
+🌊 [R0] mb=34 batch=32 fs=29529.7 fe=30566.7
+🌊 [R0] mb=35 batch=32 fs=30566.7 fe=31615.6
+🌊 [R0] mb=36 batch=32 fs=31615.6 fe=32673.3
+🌊 [R0] mb=37 batch=32 fs=32673.3 fe=33742.8
+🌊 [R0] mb=38 batch=32 fs=33742.8 fe=34825.0
+🌊 [R0] mb=39 batch=32 fs=34825.0 fe=35930.3
+🌊 [R0] mb=40 batch=32 fs=35930.3 fe=37037.4
+🌊 [R0] mb=41 batch=32 fs=37037.5 fe=38151.9
+🌊 [R0] mb=42 batch=32 fs=38151.9 fe=39275.8
+🌊 [R0] mb=43 batch=32 fs=39275.8 fe=40406.8
+🌊 [R0] mb=44 batch=32 fs=40406.8 fe=41551.8
+🌊 [R0] mb=45 batch=32 fs=41551.9 fe=42708.6
+🌊 [R0] mb=46 batch=32 fs=42708.7 fe=43880.1
+🌊 [R0] mb=47 batch=32 fs=43880.1 fe=45057.2
+🌊 [R0] mb=48 batch=32 fs=45057.2 fe=46244.8
+🌊 [R0] mb=49 batch=32 fs=46244.9 fe=47440.6
+🌊 [R0] mb=50 batch=32 fs=47440.6 fe=48648.2
+🌊 [R0] mb=51 batch=32 fs=48648.3 fe=49863.9
+🌊 [R0] mb=52 batch=32 fs=49863.9 fe=51094.8
+🌊 [R0] mb=53 batch=32 fs=51094.8 fe=52334.0
+🌊 [R0] mb=54 batch=32 fs=52334.0 fe=53579.9
+🌊 [R0] mb=55 batch=32 fs=53579.9 fe=54839.1
 ⏳ [NET_STALL] tryReadSocket fd=10 stalled=2000ms pending=48B
-⏳ [NET_STALL] tryReadSocket fd=10 stalled=4001ms pending=48B
-⏳ [NET_STALL] tryReadSocket fd=10 stalled=6002ms pending=48B
-⏳ [NET_STALL] tryReadSocket fd=10 stalled=8002ms pending=48B
-⏳ [NET_STALL] tryReadSocket fd=10 stalled=10003ms pending=48B
-⏳ [NET_STALL] tryReadSocket fd=10 stalled=12004ms pending=48B
-💧 [DRAIN] chunk=0 t=12347.2ms
-🔷️ Wave Eval 1257 ms Sync    0 ms | Sent  8554 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx   7618/   501 kB | (56 chunks, 1792 tokens)
-  logitsDump: /home/ubuntu/prefill-opt/artifacts/generality/raw/s1789_B32_t1_2m1.bin (128256 floats)
-🔶 Pred  127 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  Care
+⏳ [NET_STALL] tryReadSocket fd=10 stalled=4000ms pending=48B
+⏳ [NET_STALL] tryReadSocket fd=10 stalled=6000ms pending=48B
+⏳ [NET_STALL] tryReadSocket fd=10 stalled=8000ms pending=48B
+⏳ [NET_STALL] tryReadSocket fd=10 stalled=10001ms pending=48B
+⏳ [NET_STALL] tryReadSocket fd=10 stalled=12002ms pending=48B
+💧 [DRAIN] chunk=0 t=13081.2ms
+🔷️ Wave Eval 1258 ms Sync    0 ms | Sent  8554 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx   7618/   501 kB | (56 chunks, 1792 tokens)
+  logitsDump: /home/ubuntu/prefill-opt/artifacts/generality/raw/s1789_B32_t1_3m1.bin (128256 floats)
+🔶 Pred  130 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  Care
 🔶 Pred  128 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB | ful
-🔶 Pred  140 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  measurement
-🔶 Pred  128 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  of
-🔶 Pred  128 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  computation
-🔶 Pred  129 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB | ,
-🔶 Pred  126 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  transfer
+🔶 Pred  127 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  measurement
+🔶 Pred  129 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  of
+🔶 Pred  127 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  computation
 🔶 Pred  126 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB | ,
-🔶 Pred  139 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  and
-🔶 Pred  127 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  synchronization
-🔶 Pred  127 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  wait
-
-Evaluation
-   nBatches: 32
- prefillChunks: 56 (avg 32.00 tok/chunk)
-    nTokens: 1789
-   tokens/s: 1422.59 (0.70 ms/tok)
-Prediction
-    nTokens: 11
-   tokens/s: 7.70 (129.91 ms/tok)
-Timing
-  prefillMs: 66762.91
- syncWaitMs: 12316.36
- syncXferMs: 41.73
-     ttftMs: 67846.02
-   decodeMs: 12016.86
-    totalMs: 78779.77
-WallMetrics
- wall_tpot_ms: 1092.44
-wall_decode_tps: 0.92
-CriticalPath
-root_recv_wait_p50_ms: 957.18
-root_recv_wait_p95_ms: 959.43
-TTFTBreakdown
-     prefillEndMs: 66762.91
-firstDecodeStartMs: 66762.93
- firstDecodeDoneMs: 67845.86
-   firstTokenEmitMs: 67846.02
-TrafficBreakdown
-      kvTxMB: 0.00
-      kvRxMB: 0.00
-activationTxMB: 7.49
-activationRxMB: 5.87
-kvMigrationViolations: 0
-Scheduling
- bubbleRatioEstDecode: 0.000
-queueWaitPrefillMs: 0.00
- queueWaitDecodeMs: 0.00
- prefillSlotCount: 0
-📦 Root link traffic summary
-📦 [NET_TRAFFIC] root<->worker[1] socket=0 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
-📦 [NET_TRAFFIC] root<->worker[2] socket=1 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
-📦 [NET_TRAFFIC] root<->worker[3] socket=2 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
-📦 [NET_TRAFFIC] root<->worker[4] socket=3 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
-📦 [NET_TRAFFIC] root<->worker[5] socket=4 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
-📦 [NET_TRAFFIC] root<->worker[6] socket=5 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
-📦 [NET_TRAFFIC] root<->worker[7] socket=6 tx_total=2444B tx_count=1 tx_avg=2444.0B rx_total=0B rx_count=0 rx_avg=0.0B
-⭕ Network is closed
+🔶 Pred  126 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  transfer
+🔶 Pred  159 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB | ,
+🔶 Pred  128 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  and
+🔶 Pred  129 ms Sync    0 ms | Sent    21 kB Recv   501 kB | KV tx/rx      0/     0 kB | Act tx/rx      4/   501 kB |  synchronization
