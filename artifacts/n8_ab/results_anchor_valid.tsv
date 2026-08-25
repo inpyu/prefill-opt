@@ -1,0 +1,53 @@
+# SharedPack-SDOT 성능 앵커 — N=8, Llama3-8B Q40, prompt 512 토큰  [최종 유효]
+#
+# 이것이 최종 결과다. 이전의 invalid/results_broken_pack.tsv 는 축 규약 오독
+# 빌드의 산물이므로 사용하지 말 것 (research/19 §8.5).
+#
+# 설계 (research/19 §9.1)
+#   순서 0,0,1,1,0,0,1,1,0 — idx 1 은 웜업으로 폐기
+#   매 회 워커 7대 재기동 — 상태 잔여 제거
+#   쌍 비율 = (시간상 앞 A · 뒤 A 의 기하평균) / B, 그 기하평균을 R 로 보고
+#   성능 측정이므로 DLLAMA_VERIFY_PACK 은 끈다 (정확성은 results_correctness.tsv)
+#
+# 구성
+#   --nthreads 4 --buffer-float-type q80 --max-seq-len 1024 --steps 453
+#   --seed 42 --temperature 0 --tile-aligned 1 --wave-pipeline 1
+#   --n-batches 32 --prefill-chunk-size 32 --pp-layers 8,8,8,8,8,8,8,8
+#   워커 165.194.19.{113,191,103,94,104,54,96}:9998
+#   harness: prefill_bench/anchor.sh
+#
+# 열
+#   idx 실행 순서 / mode 0=BASE 1=SharedPack / md5 프리필 종료 logits f32 dump
+#   bin dllama 바이너리 md5 앞 8자리
+#
+# 결과 (bin a6c22236, commit 4468558)
+#   A(BASE) gm 7,611.9 ms  범위 3.0%      B(SP) gm 5,337.8 ms  범위 4.0%
+#   쌍 비율 1.4481 1.4107 1.4426 1.4033   R = 1.4260
+#   syncWait 3,725 -> 2,105 ms  (1.770x)
+#   syncXfer 13.34 -> 9.69 ms   (1.377x)
+#   non-wait residual 3,887 -> 3,233 ms  (1.202x)
+#
+# 재현 (bin 0c3accb8, commit 190a471) — 동일 설계 독립 세션
+#   쌍 비율 1.4355 1.4654 1.4411 1.4410   R = 1.4457
+#
+# 통합 8쌍  R = 1.4358,  범위 1.4033~1.4654,  log-SD ±1.4%
+#
+# 주의
+#   1) prefillMs - syncWait 는 순수 연산 시간이 아니다. 전송·executor·잔여
+#      동기화가 섞여 있으므로 "non-wait residual" 로 부른다.
+#      이 값 1.202x 가 N=1 operator 누적 1.205x 와 정합한다.
+#   2) 이 1.436x 를 DerivePP 의 4.57~4.68x 에 곱해 새 성능을 주장하면 안 된다.
+#      최종 시스템 대 llama.cpp 는 동일 조건에서 직접 다시 측정해야 한다.
+#   3) 9회 전부 logits md5 가 BASE 와 동일하다. 다만 hash 일치만으로는
+#      커널 정확성이 보장되지 않는다 — results_correctness.tsv 를 함께 볼 것.
+#
+idx	mode	prefillMs	syncWaitMs	syncXferMs	md5	bin
+1	0	7401.33	3546.92	13.13	c52e50e37e65	a6c22236
+2	0	7628.00	3705.64	13.59	c52e50e37e65	a6c22236
+3	1	5300.51	2041.14	9.59	c52e50e37e65	a6c22236
+4	1	5440.88	2237.68	10.01	c52e50e37e65	a6c22236
+5	0	7723.12	3762.45	13.29	c52e50e37e65	a6c22236
+6	0	7600.33	3830.54	13.30	c52e50e37e65	a6c22236
+7	1	5232.71	2033.73	9.44	c52e50e37e65	a6c22236
+8	1	5379.42	2114.15	9.73	c52e50e37e65	a6c22236
+9	0	7497.83	3605.65	13.19	c52e50e37e65	a6c22236
