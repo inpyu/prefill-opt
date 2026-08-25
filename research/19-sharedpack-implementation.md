@@ -550,27 +550,39 @@ B (SP)    기하평균 5,337.8 ms   범위 4.0%
 단, §8.7 대로 해시 일치만으로는 부족하다. `results_correctness.tsv` 의
 packed 표현 대조(비교 2,688회 / 불일치 0)와 함께 읽어야 한다.
 
-### 9.3 이득의 분해 — 왜 operator 1.205× 보다 큰가
+### 9.3 관측된 성분 변화 — 원인은 아직 분해되지 않았다
 
-| 성분 | BASE | SP | 비율 |
+| 성분 | BASE | SP | 관측 비율 |
 |---|---|---|---|
 | prefill 전체 | 7,612 | 5,338 | **1.426×** |
 | syncWait | 3,725 | 2,105 | 1.770× |
 | syncXfer | 13.34 | 9.69 | 1.377× |
 | non-wait residual | 3,887 | 3,233 | 1.202× |
 
-**`prefillMs - syncWait` 는 순수 연산 시간이 아니다.** 전송, executor 오버헤드,
-잔여 동기화가 섞여 있다. 따라서 "연산 1.20×" 가 아니라 **"non-wait residual
-1.202×"** 로 적어야 한다.
+**이 표를 이득의 합으로 읽으면 안 된다.**
 
-논문 표현:
+`syncWait` 는 독립적인 비용이 아니라 **앞 스테이지 완료시각에서 파생되는 결과**다
+(`research/16` §의 completion recurrence). 앞 스테이지의 `C_{k,j}` 가 줄면
+`F_{k−1,j}` 가 당겨지고 그 결과로 뒤 스테이지의 대기가 줄어든다.
+따라서 "연산 1.202× 이득 + syncWait 1.770× 이득" 처럼 더하면 **이중 계산**이다.
 
-> non-wait residual 은 1.202× 개선됐고 `syncWait` 는 1.770× 감소했다.
-> 로컬 연산 경로 개선이 파이프라인의 critical-path stall 까지 줄여
-> E2E 1.436× 로 증폭됐다.
+또한 다음 문장은 엄밀하지 않으므로 쓰지 않는다.
 
-non-wait residual 1.202× 가 N=1 operator 누적 1.205× 와 거의 정확히 일치한다는
-점이 연산 경로가 실제 원인임을 뒷받침한다.
+> ~~스테이지가 빨라져 wave overlap 이 좋아지고 bubble 이 줄었다~~
+
+스케줄과 마이크로배치 수가 그대로면 bubble 의 **슬롯 수나 비율이 자동으로 줄어든
+것은 아니다.** 줄어든 것은 각 슬롯의 길이일 수 있고, 그것은 별개의 주장이다.
+
+**현재 안전한 표현:**
+
+> SharedPack 은 stage service-time 분포와 critical path 를 변화시켰으며,
+> 그 결과 관측된 `syncWait` 가 3,725 ms 에서 2,105 ms 로 감소했다.
+> N=1 operator 개선 1.205× 보다 큰 N=8 TTFT 개선 1.426× 가 관측됐지만,
+> 그 원인은 stage 별 service-time 변화와 pipeline dependency 를 분해해
+> 확인해야 한다.
+
+분해 설계는 `research/21` §4 에 있다. 그 전까지 "pipeline amplification" 이라는
+표현은 쓰지 않는다 — 관측이지 설명이 아니다.
 
 ### 9.4 곱셈 금지
 

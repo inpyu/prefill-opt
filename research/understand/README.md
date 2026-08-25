@@ -263,3 +263,4 @@ SharedPack의 차이는 선명하지만, 온도 상승과 2.0~2.4 GHz DVFS가 �
    교락 대조군과 bit-identical gate를 먼저 고정한다.
 4. kernel-only upper bound, pack-inclusive op 시간, 단일 노드 E2E, 분산 E2E를 서로
    바꾸어 인용하지 않는다.
+- `../21-graph-hoisted-packing.md` — SharedPack novelty 평가와 CTGHP 일반화 설계

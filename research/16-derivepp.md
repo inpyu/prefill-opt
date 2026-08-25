@@ -2938,17 +2938,44 @@ placement 제약도 확인된다 — island 을 inter-switch 링크에 걸면 �
    CP island(§12.4). 단순 negative 나열이 아니라 **왜 볼 필요가 없는지**를
    balanced-capacity contraction lemma 로 보인다.
 
-6. **측정 방법론.** anchor 반복 + 정순/역순 + `flock` 배타 실행으로 CV 0.6~1.35%.
+6. **연산 계층 — SharedPack-SDOT** (`research/19`, `research/21`).
+   wave 파이프라인 위에서 N=8 TTFT 를 **1.436×**(통합 8쌍, 범위 1.403~1.465)
+   추가 단축하며 로짓이 비트 단위로 동일하다.
+
+   > **주의 1.** 이 1.436× 를 4.57~4.68× 에 곱하지 않는다. 베이스라인·세션·조건이
+   > 다르다. 최종 시스템 대 llama.cpp 는 동일 조건에서 다시 재야 한다.
+   >
+   > **주의 2.** N=1 operator 개선 1.205× 보다 큰 이유는 **아직 분해되지 않았다.**
+   > `syncWait` 감소는 앞 stage 완료시각에서 파생된 결과이므로 별도 이득으로
+   > 더하면 이중 계산이다. 분해 설계는 `research/21` §5.
+   >
+   > **주의 3.** 기법 자체("pack once, reuse")는 FBGEMM·MKL packed API·llama.cpp
+   > `repack.cpp` 에 선행이 있다. 독립 기여로 세우려면 `research/21` §4 의
+   > 자동 결정(graph 위치·소유권·생명주기·cache gate)까지 필요하다.
+   > **현재는 DerivePP 의 연산 기여로 제시한다.**
+
+7. **측정 방법론.** anchor 반복 + 정순/역순 + `flock` 배타 실행으로 CV 0.6~1.35%.
    실패 세션은 `invalid_session` 으로 분리 보존. 모든 수치는 `artifacts/<run-id>/`
    에 manifest·checksum 과 함께 고정.
 
+   여기에 **검증 계층의 반증 사례**를 더한다(`research/19` §8.7): 커널이 심각하게
+   깨진 상태(`kBlocks=1`, 버퍼 3.5배 부족)에서도 **E2E 로짓 해시가 비트 단위로
+   일치해 통과했다.** 따라서 출력 해시는 커널 정확성의 검증기가 아니며,
+   커널이 소비하는 중간 표현을 직접 대조해야 한다. 검증 계층을
+   `packed bytes -> GEMM output -> stage output -> final logits` 로 나누고,
+   검증기가 "실행했고 0건" 과 "실행하지 않음" 을 artifact 만으로 구별하도록
+   종료 시 항상 요약을 출력한다.
+
+   > bit-identical 정확성 자체는 **기여가 아니라 요구사항**으로 취급한다.
+   > *"다른 엣지 가속은 정확도를 희생한다"* 는 비교는 근거가 없으므로 쓰지 않는다.
+
 ### B. 검증 후보
 
-7. **Position-dependent pipeline formulation** — max-plus 완료시각 모델. 형식은
+8. **Position-dependent pipeline formulation** — max-plus 완료시각 모델. 형식은
    서 있으나 절대 예측이 길이에 따라 무너진다(§7.14).
-8. **Completion-vector partitioning DP** — 정확성은 brute force 6/6 일치이나
+9. **Completion-vector partitioning DP** — 정확성은 brute force 6/6 일치이나
    **이득이 확인되지 않았다.** 분할축이 두 길이 모두에서 비활성이다.
-9. **Operator/topology-aware placement `π`** — 근거였던 순위 역전이 재현되지
+10. **Operator/topology-aware placement `π`** — 근거였던 순위 역전이 재현되지
    않았다(τ −0.29 → +0.111, §7.15). **현재 기여로 제시할 근거가 없다.**
 
 ### C. 반증·기각
