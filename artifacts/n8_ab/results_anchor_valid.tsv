@@ -1,7 +1,13 @@
-# SharedPack-SDOT 성능 앵커 — N=8, Llama3-8B Q40, prompt 512 토큰  [최종 유효]
+# SharedPack-SDOT 성능 앵커 — N=8, Llama3-8B Q40, S_real=447 토큰 (S_sched=448, source prompts_gen/prompt_512.txt)  [최종 유효]
 #
 # 이것이 최종 결과다. 이전의 invalid/results_broken_pack.tsv 는 축 규약 오독
 # 빌드의 산물이므로 사용하지 말 것 (research/19 §8.5).
+#
+# 프롬프트 길이 표기 — 세 값을 구분한다
+#   S_real  = 447   tokenizer 실제 출력. 논문의 S 는 이 값이다
+#   S_sched = 448   4행 타일 정렬 패딩 후 스케줄된 위치 수
+#   source  = prompts_gen/prompt_512.txt   (파일명은 생성 시 목표치일 뿐이다)
+#   -> "prompt 512 토큰" 은 잘못된 표현이다
 #
 # 설계 (research/19 §9.1)
 #   순서 0,0,1,1,0,0,1,1,0 — idx 1 은 웜업으로 폐기

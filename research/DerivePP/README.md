@@ -1,5 +1,22 @@
 # DerivePP — 저속 Ethernet CPU 클러스터의 Prefill 계층적 Dataflow Co-design
 
+## 정확성 범위 (먼저 명확히)
+
+```
+SharedPack 은 동일한 N, B, wave 설정, activation-transfer 설정의 BASE 에 대해
+bit-identical 하다.
+```
+
+**Wave Pipeline 자체를 "exact" 라고 부르지 않는다.** wave on 과 wave off 는
+로짓이 다르다(`c52e50e37e65` vs `8b8178a50a97`). wave 경로가 활성값을 q80 로
+전송하기 때문이며 SharedPack 이전부터 있던 성질이다.
+정확성 비교는 **반드시 같은 wave 구성 안에서** 한다.
+
+Wave Pipeline 에 대해 말할 수 있는 것은 **"토큰 생략이나 근사 attention 을
+사용하지 않는 deterministic quantized prefill"** 이다.
+
+---
+
 ## 논문 메시지
 
 > 저속 Ethernet CPU 클러스터의 prefill 은 **두 계층에서** 비효율이 발생한다.
@@ -33,9 +50,13 @@
 
 | # | 기여 | 계층 |
 |---|---|---|
-| 1 | **Low-bandwidth CPU Wave Pipeline** — tensor collective 를 피하고 prompt microbatch 를 stage 사이에 흘려 연산과 통신을 겹치는 exact prefill 실행 구조 | 노드 간 |
-| 2 | **Executor-hoisted SharedPack** — 동적 activation packing 을 SDOT worker 내부에서 실행 그래프로 끌어올려, Q80×4 표현을 한 번 생성하고 여러 worker 가 공유하는 정확한 연산 경로 | 노드 내 |
-| 3 | **End-to-end hierarchical co-design** — 로컬 projection 1.205× 개선이 N=8 TTFT 1.436× 로 이어지는 현상을 stage recurrence 와 ablation 으로 설명하고, 공개 CPU 분산 baseline 과 직접 비교 | 결합 |
+| 1 | **Low-bandwidth CPU Wave Pipeline** — tensor collective 를 피하고 prompt microbatch 를 stage 사이에 흘려 연산과 통신을 겹치는 prefill 실행 구조. 토큰 생략이나 근사 attention 을 쓰지 않는다 | 노드 간 |
+| 2 | **Executor-hoisted SharedPack** — 동적 activation packing 을 SDOT worker 내부에서 실행 그래프로 끌어올려, Q80×4 표현을 한 번 생성하고 여러 worker 가 공유하는 연산 경로. 동일 구성의 BASE 에 대해 bit-identical | 노드 내 |
+| 3 | **End-to-end hierarchical co-design** *(검증 중)* — Wave Pipeline 위에서 SharedPack 이 N=8 TTFT 를 추가로 **1.436×** 단축했다. 두 계층의 interaction 과 critical-path 변화는 2×2 ablation 및 recurrence 분석으로 **검증 중이다** | 결합 |
+
+> **기여 3 은 아직 가설이다.** 지금 확정 가능한 것은 기여 1 과 2 이고,
+> "두 계층이 서로를 강화한다" 는 2×2 앵커와 recurrence 분해가 끝난 뒤에만
+> 확정 기여로 올린다. → [08-status.md](08-status.md) §8.4
 
 ---
 
@@ -49,6 +70,7 @@
 | [03-sharedpack.md](03-sharedpack.md) | **기여 2.** 노드 내 exact shared packing |
 | [04-codesign.md](04-codesign.md) | **기여 3.** 2×2 ablation 과 recurrence 검증 |
 | [05-design-space.md](05-design-space.md) | 왜 TP/CP/core split/복잡한 partition 이 아닌가 |
+| [06-evaluation.md](06-evaluation.md) | 평가 — 실험 구성, 공개 baseline 비교, ablation |
 | [07-measurement.md](07-measurement.md) | 측정 방법론과 검증 계층 |
 | [08-status.md](08-status.md) | 현재 상태, 진행 중, 리스크 |
 
