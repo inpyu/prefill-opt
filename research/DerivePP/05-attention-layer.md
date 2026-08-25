@@ -278,6 +278,66 @@ offset = ((((kvHead * numTokenTiles + tokenTile)
    올린 V 하나를 공유
 4. cache·register 용량으로 microkernel 형태를 **유도** (magic number 금지)
 
+### 5.5.0 코드에서 확인한 것 — append 지점과 그 대가
+
+`sliceKvCache` (`nn-core.cpp`):
+
+```cpp
+s.keySize   = size2D(F_32, seqLen, s.kvDim0);
+s.valueSize = size2D(F_32, seqLen, s.kvDim0);
+```
+
+`size2D(t, y, x)` 이므로 **`[token][kvDim0]` token-major** 다. head 하나를 읽으면
+`headDim=128` floats 마다 `kvDim0=1024` floats 를 건너뛴다 — **4 KiB stride**.
+`multiheadAttFused_F32` 의 `hVc[t * kvDim0 + i]` 와 일치한다.
+
+**append 지점은 `block_shift_v` (`OP_SHIFT`) 하나다.** 현재는 토큰 위치 `index` 에
+`kvDim0` floats 를 통째로 `memcpy` 한다.
+
+```cpp
+copy_UNK(&output[index * dimBytes], ...)   // 4 KiB 연속 복사 1회
+```
+
+blocked layout 으로 바꾸면 이 op 의 쓰기 패턴이 달라진다. **여기가 설계의
+성패를 가른다.**
+
+| append 단위 | 쓰기 | 주소 범위 |
+|---|---|---|
+| 토큰 1개씩 | **256회 × 16 B** (흩어짐) | 512 KiB |
+| **microbatch `B=32` 한 번에** | **256회 × 512 B** (연속) | 128 KiB |
+
+`kvDim0=1024`, `headDim=128` → KV head 8개 × head 당 feature block 32개 = 256쌍.
+
+> **토큰 하나씩 append 하면 blocked-V 는 append 쪽에서 손해다.**
+> 마이크로배치 단위로 묶어야 `(head, block)` 쌍마다 `B × 4 lane = 512 B` 가
+> 연속이 된다.
+
+### 이것이 계층 간 연결점이다
+
+**Wave Pipeline 이 고른 `B` 가 blocked-V 의 append 입자도를 결정한다.**
+
+```
+B=32, TILE=128  →  타일 하나를 4 마이크로배치가 채운다
+```
+
+`B` 는 지금까지 wave 의 실행 파라미터일 뿐이었는데([03](03-microbatch-size.md)),
+attention 계층에서 **append 효율의 결정 변수**가 된다.
+계층을 나열한 것이 아니라 서로 맞물린다는 근거가 하나 생긴다.
+
+> 사전등록: `B` 가 작을수록 append 연속 길이가 짧아지므로,
+> **blocked-V 의 append 비용은 `B` 가 작을수록 커져야 한다.**
+> `B=16` 과 `B=32` 에서 append 비용을 따로 재서 확인한다.
+
+### 함께 바뀌어야 하는 곳
+
+| 위치 | 이유 |
+|---|---|
+| `sliceKvCache` (`nn-core.cpp`) | shape 정의 |
+| `block_shift_v` (`OP_SHIFT`) | append 경로. 배치 단위 scatter 로 바뀐다 |
+| `multiheadAttFused_F32` | V accessor |
+| `addSpKvSync` (`nn-network.cpp`) | allgather 가 `[token][kvDim0]` 연속 행을 전제한다. 현 구성은 `spSize=1` 이라 안 쓰이지만 일반성에는 필요하다 |
+| decode 경로 V accessor | prefill 후 되돌리면 TTFT 이득을 훼손한다 ([05](05-attention-layer.md) §5.7) |
+
 ### 5.5.1 GQA 공유의 차별점을 엄밀히 정의한다
 
 **현재 커널도 이미** GQA head 를 그룹으로 처리하고, `t` 를 바깥 루프로 두며,
