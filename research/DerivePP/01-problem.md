@@ -64,7 +64,7 @@
 | 기호 | 뜻 |
 |---|---|
 | `S_real` | tokenizer 가 실제로 낸 토큰 수. **논문의 `S` 는 이 값이다** |
-| `S_sched` | 4행 타일 정렬 패딩 후 스케줄된 위치 수 → [02b](02b-microbatch-size.md) §2b.3 |
+| `S_sched` | 4행 타일 정렬 패딩 후 스케줄된 위치 수 → [03](03-microbatch-size.md) §2b.3 |
 | source file | 프롬프트 원본 파일명 (생성 시 목표치라 실제 토큰 수와 다르다) |
 
 | `S_real` | `S_sched` | source file |
@@ -189,9 +189,9 @@ footprint** 가 생겨 4스레드 확장이 무너지는 것이다.
 | 계층 | 벽 | 대응 | 문서 |
 |---|---|---|---|
 | 노드 간 | 통신이 계산과 안 겹침 | **Wave Pipeline** | [02](02-wave-pipeline.md) |
-| 노드 간 | 계단 비용 함수 | `B` 를 wave 실행 파라미터로 선택 | [02b](02b-microbatch-size.md) |
-| 노드 내 | 중복 packing 의 cache cliff | **SharedPack** | [03](03-sharedpack.md) |
-| 결합 | — | 계층 co-design | [04](04-codesign.md) |
+| 노드 간 | 계단 비용 함수 | `B` 를 wave 실행 파라미터로 선택 | [03](03-microbatch-size.md) |
+| 노드 내 | 중복 packing 의 cache cliff | **SharedPack** | [04](04-sharedpack.md) |
+| 결합 | — | 계층 co-design | [06](06-codesign.md) |
 
 ## 1.8 스스로에게 건 제약
 

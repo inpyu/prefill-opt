@@ -1,10 +1,10 @@
-# 08. 현재 상태
+# 10. 현재 상태
 
 *기준일 2026-08-25. 커밋 `ae2b69e`+, 바이너리 `a6c22236`.*
 
 ---
 
-## 8.1 논문 구조 재편 (2026-08-25)
+## 10.1 논문 구조 재편 (2026-08-25)
 
 **논문 중심을 `Wave Pipeline + SharedPack` 의 계층적 co-design 으로 재구성했다.**
 계획 탐색 절차와 효과 없던 병렬화 축들은 본문에서 내렸다.
@@ -17,12 +17,12 @@
 | 옮긴 곳 | 이 폴더에서 삭제. 원 기록은 `research/16~21` 에 남아 있다 |
 
 **시도했다가 도입하지 않은 것은 이 폴더에 두지 않는다.** 현재 설계를 지금 형태로
-만든 트러블슈팅만 남긴다 — 그것은 [03](03-sharedpack.md) §5.2,
-[05](05-design-space.md), [07](07-measurement.md) §7.5 에 있다.
+만든 트러블슈팅만 남긴다 — 그것은 [04](04-sharedpack.md) §5.2,
+[07](07-design-space.md), [09](09-measurement.md) §7.5 에 있다.
 
 ---
 
-## 8.2 서 있는 것
+## 10.2 서 있는 것
 
 | 항목 | 수치 | 상태 |
 |---|---|---|
@@ -49,12 +49,12 @@ cache gate 는 *"중복 packing 이 없으면(스레드 1개) 이득은 0"* 을 
 
 ---
 
-## 8.3 진행 중 — 일반성 스윕
+## 10.3 진행 중 — 일반성 스윕
 
 `S_real {447, 1789, 7212} × B {16, 32} × threads {1, 4}`, N=8 wave on, 48회.
 조합마다 `A,B,B,A` 를 연달아 돌려 같은 세션 안에서만 비율을 만든다.
 
-결과 표는 [06-evaluation.md](06-evaluation.md) §6.4 에 있다. 요약하면:
+결과 표는 [06-evaluation.md](08-evaluation.md) §6.4 에 있다. 요약하면:
 
 - 4스레드에서 일관된 이득 (447 에서 1.47~1.48, 1789 에서 1.38)
 - 1스레드에서 이득 없음 (0.9977 / 1.0056 — 잡음 수준, 두 배치에서 독립 확인)
@@ -66,59 +66,97 @@ cache gate 는 *"중복 packing 이 없으면(스레드 1개) 이득은 0"* 을 
 
 harness `prefill_bench/generality.sh`, artifact `artifacts/generality/`.
 
-## 8.4 다음 작업 — 우선순위
+## 10.4 다음 작업 — attention 계층 착수
 
-| # | 작업 | 왜 |
+병목이 이동했다. `S_real=7212` 에서 attention core 가 prefill 의 **약 53%** 이고,
+projection 을 무한 가속해도 상한이 **1.78×** 다 ([05](05-attention-layer.md) §5.1).
+
+### Phase 0~1 (지금)
+
+| # | 작업 | 상태 |
 |---|---|---|
-| 1 | **2×2 ablation (앵커)** | 논문의 핵심 표. harness 준비 완료 (`prefill_bench/ablation2x2.sh`) |
-| 2 | **recurrence 로 1.436× 원인 분해** | "pipeline amplification" 을 관찰이 아니라 메커니즘으로 |
-| 3 | 일반성 스윕 완료 | 진행 중 |
-| 4 | 최종 시스템 대 llama.cpp **동일 조건 재측정** | 곱셈 금지를 푸는 유일한 길 |
-| 5 | (선택) CTGHP 자동화 | SharedPack 을 독립 기여로 키울 때만 |
+| 0 | SharedPack 일반성 스윕 완료 + artifact 고정 | 진행 중 (27/48) |
+| 0 | 기준선 두 개 고정: `BASE-A`(Wave+per-thread pack), `BASE-B`(Wave+SharedPack) | 대기 |
+| 1 | **attention 내부 분해** — `DLLAMA_ATT_PHASE=1` 계측 삽입 완료, 빌드 대기 | 코드 준비됨 |
 
-### 1번 — 2×2 ablation
+> 새 attention 의 비교 기준은 **`BASE-B`** 다. 그래야 SharedPack 과 attention
+> 이득이 중복 계산되지 않는다.
 
-| 구성 | Wave | SharedPack |
-|---|---|---|
-| 기존 시스템 | ✗ | ✗ |
-| Wave only | ✓ | ✗ |
-| SharedPack only | ✗ | ✓ |
-| 최종 | ✓ | ✓ |
-
-예비 관측에서 **wave off 의 SP 이득 ≈ 1.276×, wave on 의 SP 이득 ≈ 1.51×** 로
-방향성이 보인다. 앵커로 확정해야 co-design 주장이 선다.
-
-### 2번 — counterfactual 네 번
+### Phase 2~8
 
 ```
-F_{k,j} = max( F_{k−1,j} + D_{k−1,k,j},  F_{k,j−1} ) + C_{k,j}
+2  production stride 를 그대로 쓰는 AV microbenchmark (4경로 A/B/C/D)
+3  append-friendly blocked V cache — 매번 transpose 하지 않는다
+4  register-level GQA 공유 microkernel — (R,D,T) 를 register 예산에서 유도
+5  QK·softmax 경로 동시 정리
+6  계층적 정확성 검증 5단
+7  2x2x2 ablation
+8  일반성 (모델축 kvMul=1/4/더 큰 GQA, head dim 64/128/256)
 ```
 
-| # | `C` | `D` | 묻는 것 |
+**예상 3~4주.** 분해 1~2일, microkernel 3~5일, KV cache 통합 4~7일,
+정확성·성능 디버깅 3~5일, 평가 4~7일.
+
+### 확정된 우선순위 원칙
+
+> **CTGHP, AxisCert, FamilyShard 같은 새 축을 동시에 벌리지 않는다.**
+> 본문은 병목 이동 서사 하나로 유지한다 → [README](README.md)
+
+FamilyShard 는 상한을 재봤더니 SharedPack 이후 family share 가 47.5% 라
+`family r=1.5` 를 얻어야 E2E +18.8% 다. attention 쪽 상한이 훨씬 크므로
+**지금은 열지 않는다.**
+
+### 아직 남은 SharedPack 작업
+
+| # | 작업 |
+|---|---|
+| a | 2×2 ablation (앵커) — harness `prefill_bench/ablation2x2.sh` 준비됨 |
+| b | recurrence 로 1.436× 원인 분해 → [06](06-codesign.md) §6.3 |
+| c | 최종 시스템 대 llama.cpp 동일 조건 재측정 (곱셈 금지를 푸는 유일한 길) |
+
+## 10.4b 최종 ablation 은 2×2 가 아니라 2×2×2 다
+
+세 기법이 있으므로 8개 조합이 원칙이다.
+
+| Wave | SharedPack | RoleSplit | 의미 |
 |---|---|---|---|
-| 1 | BASE | BASE | 모델이 실측을 맞히는가 |
-| 2 | 영향받은 matmul 만 SP | BASE | 그 projection 개선율이 1.205× 보다 컸는가 |
-| 3 | 모든 stage compute SP | BASE | 링크 고정해도 1.426× 가 나오는가 |
-| 4 | SP | SP | 모델 타당성 |
+| 0 | 0 | 0 | 원본 기준 |
+| 1 | 0 | 0 | Wave 단독 |
+| 0 | 1 | 0 | SharedPack 단독 |
+| 0 | 0 | 1 | Attention 단독 |
+| 1 | 1 | 0 | **현재 DerivePP** |
+| 1 | 0 | 1 | Wave–attention 상호작용 |
+| 0 | 1 | 1 | 두 CPU 연산 최적화의 합 |
+| 1 | 1 | 1 | 최종 시스템 |
 
-**3번이 재현하지 못하면 TTFT 개선의 일부는 SharedPack 으로 귀속할 수 없다.**
+모든 길이에서 8조합을 다 돌리면 비용이 크므로 나눈다.
 
----
+```
+S_real=447    8조합 전체
+S_real=1789   핵심 6조합
+S_real=7212   Wave+SP  대  Wave+SP+Attention 중심
+13B           BASE 와 최종만
+```
 
-## 8.5 리뷰어가 찌를 지점
+측정 항목: TTFT / QK·softmax·AV 시간 / projection 시간 / stage service time /
+syncWait / L1·L2·LLC miss / 메모리 대역폭 / KV cache 용량 / decode latency /
+정확성 계층 결과.
+
+## 10.5 리뷰어가 찌를 지점
 
 | 위험 | 현재 방어 | 필요한 것 |
 |---|---|---|
-| "1.436× 의 메커니즘이 설명 안 됐다" | 1스레드 R=0.9977 (원인이 중복 packing 임은 확인) | §8.4 의 2번 (critical path 까지) |
-| "두 기법을 나열했을 뿐이다" | 예비 관측의 방향성 | §8.4 의 1번 (2×2 앵커) |
+| "1.436× 의 메커니즘이 설명 안 됐다" | 1스레드 R=0.9977 (원인이 중복 packing 임은 확인) | §10.4 의 2번 (critical path 까지) |
+| "두 기법을 나열했을 뿐이다" | 예비 관측의 방향성 | §10.4 의 1번 (2×2 앵커) |
 | "wave PP 는 GPipe 와 유사하다" | 저속·비대칭 링크라는 조건, 공개 baseline 0.41~0.44× | — |
 | "shared packing 은 알려진 원리다" | 분산 파이프라인 E2E 측정, 계층 co-design | (선택) CTGHP |
 | "`N` 축이 노드 구성과 교락됐다" | 문서에 명시 | `(N, π)` 계획 비교로 표기 |
 | "단일 플랫폼·단일 모델" | 13B capacity | held-out 모델 검증 |
+| "attention 최적화가 이미 시도돼 실패했다" | 실패 원인이 기록돼 있고 RoleSplit 이 그 원인을 겨냥한다 | [05](05-attention-layer.md) §5.3 |
 
 ---
 
-## 8.6 절대 하지 말 것
+## 10.6 절대 하지 말 것
 
 ```
 4.57×  ×  1.436×  =  6.56×                       ← 곱하지 않는다
@@ -131,7 +169,7 @@ F_{k,j} = max( F_{k−1,j} + D_{k−1,k,j},  F_{k,j−1} ) + C_{k,j}
 
 ---
 
-## 8.7 하드웨어
+## 10.7 하드웨어
 
 | 노드 | 상태 |
 |---|---|

@@ -16,6 +16,7 @@
 #include "nn-cpu-ops.hpp"
 #include "nn-repack.hpp"
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include "nn-quants.hpp"
 #include "llamafile/sgemm.hpp"
@@ -1113,6 +1114,59 @@ static inline float horizontalSum_F32(float32x4_t v) {
 }
 #endif
 
+// ── attention phase 계측 (research/DerivePP 03b, Phase 1) ──
+//
+// S=7212 에서 attention core 가 prefill 의 약 53% 다(research/17 §7.6). 그런데
+// **그 안에서 무엇이 큰지는 확정되지 않았다.** 커널 주석에 남은 두 부정 결과가
+// 이미 힌트를 준다:
+//   · QK 4x4 블로킹  마이크로벤치 1.81x -> in-situ 38,031 vs 39,050 (오히려 손해)
+//     "softmax·스크래치 왕복·온라인 누적 갱신 같은 주변 비용이 커서 묻힌다"
+//   · AV 블로킹      V 타일 512 kB 가 L2 를 넘겨 1.71배 악화
+// 즉 QK/AV 가 아니라 softmax 경로가 지배적일 가능성이 있다. 재보지 않고
+// V 레이아웃부터 바꾸면 개선하고도 전체가 안 움직일 수 있다.
+//
+// DLLAMA_ATT_PHASE=1 로 켠다. 타일 단위로 재므로 오버헤드는 작다.
+enum { ATT_PH_QK = 0, ATT_PH_SOFTMAX, ATT_PH_AV, ATT_PH_FINAL, ATT_PH_WALL, ATT_PH_N };
+static std::atomic<unsigned long long> gAttPhaseNs[ATT_PH_N];
+static const char *kAttPhaseName[ATT_PH_N] = { "qk", "softmax", "av", "finalize", "wall" };
+
+static inline bool attPhaseEnabled() {
+    static const bool on = [] {
+        const char *e = std::getenv("DLLAMA_ATT_PHASE");
+        return e != nullptr && e[0] == '1';
+    }();
+    return on;
+}
+static inline unsigned long long attNowNs() {
+    return (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+#define ATT_PH_T0(v)      const unsigned long long v = attPhaseEnabled() ? attNowNs() : 0ull
+#define ATT_PH_ADD(v, ix) do { if (attPhaseEnabled()) \
+    gAttPhaseNs[ix].fetch_add(attNowNs() - (v), std::memory_order_relaxed); } while (0)
+
+void nnCpuOpsReportAttPhase() {
+    if (!attPhaseEnabled())
+        return;
+    const double wall = (double)gAttPhaseNs[ATT_PH_WALL].load() / 1e6;
+    if (wall <= 0.0)
+        return;
+    double sum = 0.0;
+    for (int i = 0; i < ATT_PH_WALL; i++)
+        sum += (double)gAttPhaseNs[i].load() / 1e6;
+    printf("[ATT_PHASE] (스레드 합산, ms)\n");
+    for (int i = 0; i < ATT_PH_WALL; i++) {
+        const double v = (double)gAttPhaseNs[i].load() / 1e6;
+        printf("%-10s %12.1f  %6.2f%%\n", kAttPhaseName[i], v, 100.0 * v / wall);
+    }
+    printf("%-10s %12.1f\n", "phase합", sum);
+    printf("%-10s %12.1f\n", "wall", wall);
+    // 사전등록 판정: phase 합이 wall 의 +-5% 안이어야 계측을 신뢰한다
+    const double err = 100.0 * (sum - wall) / wall;
+    printf("잔차 %+.2f%%  -> %s\n", err,
+        (err > -5.0 && err < 5.0) ? "OK (+-5% 이내)" : "계측 수정 필요");
+}
+
 static void multiheadAttFused_F32(
     NnByte **outputs,
     const float *query, const NnUint qSliceD0,
@@ -1123,6 +1177,7 @@ static void multiheadAttFused_F32(
     const NnUint nThreads, const NnUint threadIndex)
 {
     (void)seqLen;
+    ATT_PH_T0(tWall);
     const NnUint kvMul = nHeads / nKvHeads;
     const float headDimRoot = sqrtf(headDim);
     const NnUint nGroups = (kvMul > 0u && nHeads0 % kvMul == 0u) ? (nHeads0 / kvMul) : 0u;
@@ -1217,6 +1272,7 @@ static void multiheadAttFused_F32(
             //   · KV 4 kB 스트라이드 접근의 손해는 4 % 뿐 -> 레이아웃 변환 불필요
             //   · 쿼리를 G 배로 융합해도 1.00x -> t 바깥 루프가 이미 K 재사용 달성
             //   · AV 블록화는 V 타일이 512 kB 로 L2 를 넘겨 1.71배 **악화**
+            ATT_PH_T0(tQk);
             for (NnUint t = t0; t < t1; t++) {
                 const float *posK = &hKc[t * kvDim0];
                 for (NnUint j = 0; j < nHeadsInGroup; j++) {
@@ -1234,8 +1290,11 @@ static void multiheadAttFused_F32(
                 }
             }
 
+            ATT_PH_ADD(tQk, ATT_PH_QK);
+
             // (2) 온라인 소프트맥스 갱신. 이 타일에서 (b,h) 별 max/sum 을 합치고
             //     이전 누적분 o 를 alpha 로 재스케일한다.
+            ATT_PH_T0(tSm);
             for (NnUint j = 0; j < nHeadsInGroup; j++) {
                 const NnUint h0 = h0Base + j;
                 for (NnUint b = 0; b < bCount; b++) {
@@ -1349,6 +1408,8 @@ static void multiheadAttFused_F32(
                 }
             }
 
+            ATT_PH_ADD(tSm, ATT_PH_SOFTMAX);
+
             // (3) o += p * V.
             //
             // ⚠️ 여기는 블록화하지 않는다. 시도했다가 되돌렸다:
@@ -1363,6 +1424,7 @@ static void multiheadAttFused_F32(
             // 따로 재야 한다.
             //
             // t 를 바깥에 두면 V 의 한 위치를 배치 전체가 재사용한다.
+            ATT_PH_T0(tAv);
             for (NnUint t = t0; t < t1; t++) {
                 const float *posV = &hVc[t * kvDim0];
                 for (NnUint j = 0; j < nHeadsInGroup; j++) {
@@ -1386,9 +1448,11 @@ static void multiheadAttFused_F32(
                     }
                 }
             }
+            ATT_PH_ADD(tAv, ATT_PH_AV);
         }
 
         // 정규화: 지금까지 o 는 분자만 누적돼 있다.
+        ATT_PH_T0(tFin);
         for (NnUint j = 0; j < nHeadsInGroup; j++) {
             const NnUint h0 = h0Base + j;
             for (NnUint b = 0; b < bCount; b++) {
@@ -1410,8 +1474,10 @@ static void multiheadAttFused_F32(
 #endif
             }
         }
+        ATT_PH_ADD(tFin, ATT_PH_FINAL);
         } // b-타일
     }
+    ATT_PH_ADD(tWall, ATT_PH_WALL);
 }
 
 

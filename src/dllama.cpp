@@ -12,6 +12,7 @@
 
 void reportOpProfile();
 void nnReportVerifyPackSummary();
+void nnCpuOpsReportAttPhase();
 void markPrefillEndOpProfile();
 #include <climits>
 #include <stdexcept>
@@ -1131,6 +1132,7 @@ static void printUsage() {
 
 static void verifyPackSignalHandler(int sig) {
     nnReportVerifyPackSummary();
+    nnCpuOpsReportAttPhase();
     std::fflush(stdout);
     _exit(sig == SIGINT ? 130 : 143);
 }
@@ -1175,6 +1177,7 @@ int main(int argc, char **argv) {
     // "검증했고 0건" 과 "검증 자체를 안 함" 을 artifact 만으로 구분하기 위해서다.
     // 워커는 보통 SIGTERM 으로 죽으므로 핸들러에서도 찍는다(main 끝에 도달하지 못한다).
     nnReportVerifyPackSummary();
+    nnCpuOpsReportAttPhase();
     cleanupSockets();
     return returnCode;
 }

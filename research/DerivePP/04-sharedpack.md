@@ -1,9 +1,9 @@
-# 03. SharedPack-SDOT — 노드 내 연산 계층
+# 04. SharedPack-SDOT — 노드 내 연산 계층
 
 파이프라인이 서고 나서 **"스케줄링 알고리즘이 아니라 스케줄링 위에 올릴 최적화된
 CPU 연산"** 으로 우선순위를 옮겼다. 그 결과물이다.
 
-## 3.1 문제 — 커널이 같은 일을 4번 한다
+## 4.1 문제 — 커널이 같은 일을 4번 한다
 
 Q4_0 repack GEMM 은 이렇게 돈다.
 
@@ -24,7 +24,7 @@ op 내부 배리어가 없다. 그래서 **각 스레드가 자기 스크래치�
 스레드 3:  ...
 ```
 
-## 3.2 진단 — 비용은 pack 연산이 아니라 cache footprint 다
+## 4.2 진단 — 비용은 pack 연산이 아니라 cache footprint 다
 
 처음엔 `K` 가 길어서(Down, K=14336) 느린 줄 알았다. **K-panelization(KP-SDOT)** 을
 설계했는데, dup/shared 대조를 해보니 원인이 달랐다.
@@ -43,7 +43,7 @@ op 내부 배리어가 없다. 그래서 **각 스레드가 자기 스크래치�
 footprint 가 생겨 4스레드 확장이 무너지는 것이다.
 `K` 는 교락 변수였다 — KP-SDOT 은 없는 문제를 푸는 것이었으므로 **중단했다.**
 
-## 3.3 해법 — pack 을 executor op 로 승격
+## 4.3 해법 — pack 을 executor op 로 승격
 
 pack 을 별도 op(`OP_PACK_Q80X4`)로 분리한다. 그러면 **executor 의 op 경계가
 barrier 를 제공**하므로, 네 스레드가 서로 다른 batch-row group 을 **하나의 버퍼**에
@@ -67,7 +67,7 @@ nBatches × kBlocks × 34  ==  (nBatches/4) × kBlocks × sizeof(block_q8_0x4)
 
 덕분에 **버퍼 폭이 곧 K** 가 되어 폭을 직접 계산하다 틀릴 여지가 사라진다.
 
-## 3.4 효과
+## 4.4 효과
 
 **N=8, S=447, wave on. 앵커 설계(웜업 폐기 + 정/역 교차 + 기하평균 쌍 비율).**
 
@@ -100,7 +100,7 @@ nBatches × kBlocks × 34  ==  (nBatches/4) × kBlocks × sizeof(block_q8_0x4)
 **정확성: 로짓이 BASE 와 비트 단위로 동일**하고, packed 표현 대조 2,688회 중
 불일치 0 이다.
 
-## 3.5 이 표를 읽을 때의 함정
+## 4.5 이 표를 읽을 때의 함정
 
 **`syncWait` 를 별도 이득으로 더하면 이중 계산이다.**
 `syncWait` 는 독립 비용이 아니라 **앞 스테이지 완료시각에서 파생되는 결과**다
@@ -121,7 +121,7 @@ nBatches × kBlocks × 34  ==  (nBatches/4) × kBlocks × sizeof(block_q8_0x4)
 > N=1 operator 개선 1.205× 보다 큰 N=8 TTFT 개선 1.426× 가 관측됐지만,
 > **그 원인은 아직 분해되지 않았다.**
 
-## 3.6 novelty 위치 — 솔직하게
+## 4.6 novelty 위치 — 솔직하게
 
 **"pack once, reuse" 는 선행 기술과 구별되지 않는다.**
 
@@ -140,7 +140,7 @@ nBatches × kBlocks × 34  ==  (nBatches/4) × kBlocks × sizeof(block_q8_0x4)
 **bit-identical 정확성도 novelty 가 아니라 요구사항으로 취급한다.**
 *"다른 엣지 가속은 정확도를 희생한다"* 는 비교는 근거가 없어 쓰지 않는다.
 
-## 3.7 개발 중 가장 값진 사고
+## 4.7 개발 중 가장 값진 사고
 
 구현 도중 `size2D(floatType, y, x)` 의 축을 두 곳에서 반대로 읽었다.
 
@@ -160,4 +160,4 @@ nBatches × kBlocks × 34  ==  (nBatches/4) × kBlocks × sizeof(block_q8_0x4)
 > **일부 구성에서의 최종 해시 일치는 중간 커널 정확성을 보장하지 않는다.**
 > (왜 그 두 구성에서 통과했는지는 규명하지 못했고, 수정 후에는 무의미해졌다.)
 
-이 반증 사례가 [07-measurement.md](07-measurement.md) 의 검증 계층을 만들었다.
+이 반증 사례가 [07-measurement.md](09-measurement.md) 의 검증 계층을 만들었다.
