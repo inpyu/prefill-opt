@@ -1196,25 +1196,6 @@ void nnSigSafeDumpCounters() {
     ssize_t r = write(1, buf, (std::size_t)len); (void)r;
 }
 
-// VERIFY_PACK 도 같은 이유로 시그널 경로에서는 write(2) 만 쓴다.
-// 워커는 SIGTERM 으로 죽으므로 이게 없으면 워커측 검증 자료를 잃는다.
-void nnSigSafeDumpVerifyPack() {
-    const char *e = std::getenv("DLLAMA_VERIFY_PACK");
-    if (e == nullptr || e[0] == '0' || e[0] == '\0')
-        return;
-    char buf[256]; int len = 0;
-    const char *hdr = "[VERIFY_PACK_RAW] comparisons=";
-    for (int i = 0; hdr[i] != '\0'; i++) buf[len++] = hdr[i];
-    sigSafeULL(buf, gVerifyPackComparisons.load(), &len);
-    const char *m = " bytes_checked=";
-    for (int i = 0; m[i] != '\0'; i++) buf[len++] = m[i];
-    sigSafeULL(buf, gVerifyPackBytes.load(), &len);
-    const char *k = " mismatches=";
-    for (int i = 0; k[i] != '\0'; i++) buf[len++] = k[i];
-    sigSafeULL(buf, gVerifyPackMismatches.load(), &len);
-    buf[len++] = '\n';
-    ssize_t r = write(1, buf, (std::size_t)len); (void)r;
-}
 
 void nnCpuOpsReportAttPhase() {
     if (!attPhaseEnabled())
@@ -2171,6 +2152,26 @@ static void nnVerifyPackAccum(unsigned long long comparisons, unsigned long long
 }
 static void nnVerifyPackMismatch() {
     gVerifyPackMismatches.fetch_add(1ull, std::memory_order_relaxed);
+}
+
+// VERIFY_PACK 도 같은 이유로 시그널 경로에서는 write(2) 만 쓴다.
+// 워커는 SIGTERM 으로 죽으므로 이게 없으면 워커측 검증 자료를 잃는다.
+void nnSigSafeDumpVerifyPack() {
+    const char *e = std::getenv("DLLAMA_VERIFY_PACK");
+    if (e == nullptr || e[0] == '0' || e[0] == '\0')
+        return;
+    char buf[256]; int len = 0;
+    const char *hdr = "[VERIFY_PACK_RAW] comparisons=";
+    for (int i = 0; hdr[i] != '\0'; i++) buf[len++] = hdr[i];
+    sigSafeULL(buf, gVerifyPackComparisons.load(), &len);
+    const char *m = " bytes_checked=";
+    for (int i = 0; m[i] != '\0'; i++) buf[len++] = m[i];
+    sigSafeULL(buf, gVerifyPackBytes.load(), &len);
+    const char *k = " mismatches=";
+    for (int i = 0; k[i] != '\0'; i++) buf[len++] = k[i];
+    sigSafeULL(buf, gVerifyPackMismatches.load(), &len);
+    buf[len++] = '\n';
+    ssize_t r = write(1, buf, (std::size_t)len); (void)r;
 }
 
 void nnReportVerifyPackSummary() {
