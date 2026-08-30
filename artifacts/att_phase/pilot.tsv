@@ -1,0 +1,4 @@
+=== A) 계측기 오버헤드 검증 (S_real=1789, B=32, 4스레드)
+tag	phase	prefillMs	attMs	md5	bin
+ovh_1_off	0	129745.41	42180.4	8b8178a50a97	6852f155
+ovh_2_on	1	129783.31	42407.3	8b8178a50a97	6852f155

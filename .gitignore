@@ -58,3 +58,6 @@ artifacts/**/*.bin
 /bench_shape
 /kp_sdot
 /wcep_scan
+
+# Claude Code 로컬 설정 — 사람마다 다르다
+.claude/
